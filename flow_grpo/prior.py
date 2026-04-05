@@ -376,6 +376,7 @@ class ParticlePrior:
 
         self.noises = all_noises
         r = torch.tensor(all_rewards, dtype=torch.float32)
+        self.rewards = r
         # Advantage-based weighting
         advantages = (r - r.mean()) / (r.std() + 1e-8)
         self.weights = torch.softmax(advantages / self.temperature, dim=0)
