@@ -29,7 +29,7 @@ def _add_prior_config(config):
     prior.update_method = "reward_weighted"  # "reward_weighted", "cem", or "particle"
     prior.regularization_mode = "kl"         # "kl" or "interpolation" (gaussian methods)
     prior.alpha = 0.1                        # interpolation strength (gaussian methods)
-    prior.kl_max = 1.0                       # max KL from N(0,I) (gaussian methods)
+    prior.kl_max = 1e10                       # max KL from N(0,I); 1e10 = effectively no constraint
     prior.elite_ratio = 0.1                  # top fraction (CEM only)
     prior.temperature = 1.0                  # softmax temperature for reward weighting
     prior.cache_dir = "cache/prior_shaping"  # disk cache for noise->reward pairs (always saved)
@@ -96,6 +96,24 @@ def pickscore_sd3_prior_4gpu():
     config.sample.num_batches_per_epoch = 8
     config.sample.test_batch_size = 16
     config.save_dir = "logs/prior_shaping/pickscore_4gpu"
+    return config
+
+
+def pickscore_sd3_particle_4gpu():
+    """4x A40 48GB config for particle prior shaping.
+
+    80% from N(0,I), 20% from reward-weighted buffer.
+    """
+    config = pickscore_sd3_prior_1gpu()
+    config.prior.update_method = "particle"
+    config.prior.mix_ratio = 0.8              # 80% N(0,I), 20% buffer
+    config.prior.perturbation_std = 0.1
+    config.prior.temperature = 1.0
+    config.sample.train_batch_size = 8
+    config.sample.num_batches_per_epoch = 8
+    config.sample.test_batch_size = 16
+    config.prior.cache_dir = "cache/prior_shaping_particle"
+    config.save_dir = "logs/prior_shaping/particle_4gpu"
     return config
 
 
