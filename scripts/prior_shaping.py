@@ -285,7 +285,7 @@ def main(_):
     )
 
     if accelerator.is_main_process:
-        wandb.init(project="flow_grpo", name=f"prior_shaping_{config.run_name}")
+        wandb.init(project="flow_grpo", name=f"{config.prior.update_method}_{config.run_name}")
     logger.info(f"\n{config}")
 
     set_seed(config.seed, device_specific=True)
