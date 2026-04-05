@@ -99,6 +99,34 @@ def pickscore_sd3_prior_4gpu():
     return config
 
 
+def pickscore_sd3_particle_8gpu_h20():
+    """8x H20 96GB config for particle prior shaping.
+
+    Larger batches and more samples per epoch for faster convergence.
+    8*16*8 = 1024 samples per epoch.
+    """
+    config = pickscore_sd3_prior_1gpu()
+    config.prior.update_method = "particle"
+    config.prior.mix_ratio = 0.8              # 80% N(0,I), 20% buffer
+    config.prior.perturbation_std = 0.1
+    config.prior.temperature = 1.0
+    config.prior.max_cache_epochs = 100       # more cache with 96GB RAM
+
+    config.resolution = 512
+    config.sample.train_batch_size = 16       # 96GB can handle 16 easily
+    config.sample.num_batches_per_epoch = 8   # 8*16*8 = 1024 samples/epoch
+    config.sample.test_batch_size = 32
+    config.sample.num_steps = 40
+    config.sample.eval_num_steps = 40
+
+    config.num_epochs = 200
+    config.eval_freq = 10
+    config.save_freq = 20
+    config.prior.cache_dir = "cache/prior_shaping_particle_8gpu"
+    config.save_dir = "logs/prior_shaping/particle_8gpu_h20"
+    return config
+
+
 def pickscore_sd3_particle_4gpu():
     """4x A40 48GB config for particle prior shaping.
 
