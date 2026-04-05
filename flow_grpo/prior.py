@@ -3,9 +3,16 @@ Prior shaping utilities for Flow Matching models.
 
 Instead of fine-tuning DiT weights (as Flow-GRPO does), we keep the DiT frozen
 and optimize the noise prior distribution. Since Flow Matching is an ODE, a fixed
-noise deterministically maps to a fixed image and reward. We use the Cross-Entropy
-Method (CEM) to iteratively reshape the prior N(0, I) toward high-reward regions,
-with regularization to prevent drift from the standard normal.
+noise deterministically maps to a fixed image and reward.
+
+Two update strategies:
+- "reward_weighted" (default): On-policy. Uses all samples from the current epoch
+  with advantage-based weighting (analogous to GRPO). Every sample contributes:
+  high-reward samples pull the prior toward them, low-reward samples push it away.
+- "cem": Cross-Entropy Method. Can use historical cached data. Only elite (top-k%)
+  samples contribute to the update, discarding the rest.
+
+Both strategies support KL and interpolation regularization to prevent drift from N(0,I).
 """
 
 import os
@@ -19,9 +26,13 @@ from typing import Tuple, Optional, Dict, List
 class GaussianPrior:
     """Diagonal Gaussian prior N(mu, diag(sigma^2)) for latent noise sampling.
 
-    Supports CEM-based updates with two regularization modes:
+    Update strategies:
+    - reward_weighted: on-policy, all samples contribute via advantage weighting
+    - cem: elite selection from (optionally historical) samples
+
+    Regularization modes:
     - "kl": constrain KL(p_shaped || N(0,I)) <= kl_max via binary search
-    - "interpolation": mu_new = alpha * mu_elite, sigma2_new = (1-alpha) + alpha * sigma2_elite
+    - "interpolation": mu_new = alpha * mu_target, sigma2_new = (1-alpha) + alpha * sigma2_target
     """
 
     def __init__(
@@ -113,26 +124,81 @@ class GaussianPrior:
             "sigma_mean": float(self.sigma2.sqrt().mean()),
         }
 
-    def _regularize_interpolation(self, mu_elite: torch.Tensor, sigma2_elite: torch.Tensor):
+    def update_reward_weighted(
+        self,
+        noises: torch.Tensor,
+        rewards: np.ndarray,
+        temperature: float = 1.0,
+    ) -> Dict[str, float]:
+        """On-policy reward-weighted update: all samples contribute via advantages.
+
+        Analogous to GRPO: advantages = (r - mean) / std, then softmax weighting.
+        High-reward samples pull the prior toward them, low-reward samples push away.
+
+        Args:
+            noises: (N, *shape) noise samples from the CURRENT prior (on-policy).
+            rewards: (N,) corresponding rewards.
+            temperature: softmax temperature for advantage weighting.
+
+        Returns:
+            Dict of update statistics for logging.
+        """
+        N = len(rewards)
+        noises = noises.float()
+
+        # Compute advantages (GRPO-style normalization)
+        r = torch.tensor(rewards, dtype=torch.float32)
+        advantages = (r - r.mean()) / (r.std() + 1e-8)
+
+        # Softmax weighting over ALL samples
+        weights = torch.softmax(advantages / temperature, dim=0)  # (N,)
+
+        # Weighted mean and variance
+        weights_expanded = weights.view(N, *([1] * len(self.shape)))
+        mu_target = (weights_expanded * noises).sum(dim=0)
+        diff = noises - mu_target.unsqueeze(0)
+        sigma2_target = (weights_expanded * diff.pow(2)).sum(dim=0)
+        sigma2_target = sigma2_target.clamp(min=1e-6)
+
+        # Apply regularization
+        if self.regularization_mode == "interpolation":
+            self._regularize_interpolation(mu_target, sigma2_target)
+        elif self.regularization_mode == "kl":
+            self._regularize_kl(mu_target, sigma2_target)
+        else:
+            raise ValueError(f"Unknown regularization mode: {self.regularization_mode}")
+
+        kl = self.kl_from_standard_normal()
+        return {
+            "reward_mean": float(r.mean()),
+            "reward_std": float(r.std()),
+            "reward_max": float(r.max()),
+            "reward_min": float(r.min()),
+            "kl_from_n01": kl,
+            "mu_norm": float(self.mu.norm()),
+            "sigma_mean": float(self.sigma2.sqrt().mean()),
+        }
+
+    def _regularize_interpolation(self, mu_target: torch.Tensor, sigma2_target: torch.Tensor):
         """Linear interpolation toward elite stats, anchored at N(0, I)."""
         self.mu = self.alpha * mu_elite
         self.sigma2 = (1 - self.alpha) * torch.ones_like(sigma2_elite) + self.alpha * sigma2_elite
 
-    def _regularize_kl(self, mu_elite: torch.Tensor, sigma2_elite: torch.Tensor):
-        """Binary search for largest beta s.t. KL(N(beta*mu_e, (1-beta)+beta*sigma2_e) || N(0,I)) <= kl_max."""
+    def _regularize_kl(self, mu_target: torch.Tensor, sigma2_target: torch.Tensor):
+        """Binary search for largest beta s.t. KL(N(beta*mu, (1-beta)+beta*sigma2) || N(0,I)) <= kl_max."""
         lo, hi = 0.0, 1.0
         for _ in range(50):  # 50 iterations gives ~1e-15 precision
             mid = (lo + hi) / 2.0
-            mu_cand = mid * mu_elite
-            sigma2_cand = (1 - mid) + mid * sigma2_elite
+            mu_cand = mid * mu_target
+            sigma2_cand = (1 - mid) + mid * sigma2_target
             kl = self._compute_kl(mu_cand, sigma2_cand)
             if kl <= self.kl_max:
                 lo = mid
             else:
                 hi = mid
 
-        self.mu = lo * mu_elite
-        self.sigma2 = (1 - lo) + lo * sigma2_elite
+        self.mu = lo * mu_target
+        self.sigma2 = (1 - lo) + lo * sigma2_target
 
     @staticmethod
     def _compute_kl(mu: torch.Tensor, sigma2: torch.Tensor) -> float:

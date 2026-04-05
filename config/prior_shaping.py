@@ -2,8 +2,13 @@
 Configs for prior shaping experiments.
 
 Instead of fine-tuning the DiT (as Flow-GRPO does), we keep it frozen and
-optimize the noise prior via CEM. These configs mirror the Flow-GRPO PickScore
-configs for fair comparison.
+optimize the noise prior distribution. These configs mirror the Flow-GRPO
+PickScore configs for fair comparison.
+
+Two update strategies:
+- "reward_weighted" (default): on-policy, all samples contribute via advantage
+  weighting. Analogous to GRPO where every sample provides signal.
+- "cem": Cross-Entropy Method with elite selection from cached historical data.
 """
 
 import ml_collections
@@ -16,13 +21,14 @@ base = imp.load_source("base", os.path.join(os.path.dirname(__file__), "base.py"
 def _add_prior_config(config):
     """Add prior-shaping-specific fields to an existing base config."""
     config.prior = prior = ml_collections.ConfigDict()
-    prior.regularization_mode = "kl"        # "kl" (default) or "interpolation"
+    prior.update_method = "reward_weighted"  # "reward_weighted" (default) or "cem"
+    prior.regularization_mode = "kl"         # "kl" (default) or "interpolation"
     prior.alpha = 0.1                        # interpolation strength
-    prior.kl_max = 5.0                       # max KL(p_shaped || N(0,I))
-    prior.elite_ratio = 0.1                  # top fraction for CEM
-    prior.temperature = 1.0                  # softmax temperature (0 = hard top-k)
-    prior.cache_dir = "cache/prior_shaping"  # disk cache for noise->reward pairs
-    prior.use_cache_history = True           # use all historical data for CEM update
+    prior.kl_max = 1.0                       # max KL(p_shaped || N(0,I)); small = conservative
+    prior.elite_ratio = 0.1                  # top fraction for CEM (only used when update_method="cem")
+    prior.temperature = 1.0                  # softmax temperature for reward weighting
+    prior.cache_dir = "cache/prior_shaping"  # disk cache for noise->reward pairs (always saved)
+    prior.use_cache_history = True           # use historical data for CEM (ignored in reward_weighted)
     prior.max_cache_epochs = 50              # max epochs to load from cache (-1 = all)
     prior.resume_prior_path = ""             # path to a saved prior .pt file
 

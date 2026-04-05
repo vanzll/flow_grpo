@@ -367,16 +367,17 @@ def main(_):
         config.sample.train_batch_size * accelerator.num_processes * config.sample.num_batches_per_epoch
     )
     logger.info("***** Running prior shaping *****")
+    logger.info(f"  Update method = {config.prior.update_method}")
     logger.info(f"  Batch size per device = {config.sample.train_batch_size}")
     logger.info(f"  Total samples per epoch = {samples_per_epoch}")
     logger.info(f"  Regularization mode = {config.prior.regularization_mode}")
-    logger.info(f"  Elite ratio = {config.prior.elite_ratio}")
+    logger.info(f"  KL max = {config.prior.kl_max}")
     logger.info(f"  Prior latent shape = {latent_shape}")
 
     train_iter = iter(train_dataloader)
 
     # ===========================================================================
-    # Main CEM loop
+    # Main loop
     # ===========================================================================
     for epoch in range(config.num_epochs):
         # ---- Eval (periodic) ----
@@ -452,27 +453,37 @@ def main(_):
         all_noises_cpu = all_noises.cpu()
         all_rewards_np = all_rewards.cpu().numpy()
 
-        # ---- Cache to disk ----
+        # ---- Cache to disk (always, regardless of update method) ----
         if accelerator.is_main_process:
             cache.append(all_noises_cpu, all_rewards_np, epoch)
 
-        # ---- CEM update (rank 0) ----
+        # ---- Prior update (rank 0) ----
         update_stats = {}
         if accelerator.is_main_process:
-            if config.prior.use_cache_history:
-                hist_noises, hist_rewards = cache.load_recent(
-                    max_epochs=config.prior.max_cache_epochs
+            if config.prior.update_method == "reward_weighted":
+                # On-policy: only use current epoch's samples (analogous to GRPO)
+                update_stats = prior.update_reward_weighted(
+                    all_noises_cpu,
+                    all_rewards_np,
+                    temperature=config.prior.temperature,
+                )
+            elif config.prior.update_method == "cem":
+                # CEM: can use historical cached data
+                if config.prior.use_cache_history:
+                    hist_noises, hist_rewards = cache.load_recent(
+                        max_epochs=config.prior.max_cache_epochs
+                    )
+                else:
+                    hist_noises = all_noises_cpu
+                    hist_rewards = all_rewards_np
+                update_stats = prior.update_cem(
+                    hist_noises,
+                    hist_rewards,
+                    elite_ratio=config.prior.elite_ratio,
+                    temperature=config.prior.temperature,
                 )
             else:
-                hist_noises = all_noises_cpu
-                hist_rewards = all_rewards_np
-
-            update_stats = prior.update_cem(
-                hist_noises,
-                hist_rewards,
-                elite_ratio=config.prior.elite_ratio,
-                temperature=config.prior.temperature,
-            )
+                raise ValueError(f"Unknown update method: {config.prior.update_method}")
 
         # Broadcast updated prior to all GPUs
         broadcast_prior(prior, accelerator)
@@ -490,7 +501,7 @@ def main(_):
                 "prior_sigma_mean": float(prior.sigma2.sqrt().mean()),
                 "cache_total_samples": cache.total_samples,
             }
-            log_dict.update({f"cem_{k}": v for k, v in update_stats.items()})
+            log_dict.update({f"update_{k}": v for k, v in update_stats.items()})
             wandb.log(log_dict, step=epoch)
 
             logger.info(
