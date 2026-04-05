@@ -5,14 +5,16 @@ Instead of fine-tuning DiT weights (as Flow-GRPO does), we keep the DiT frozen
 and optimize the noise prior distribution. Since Flow Matching is an ODE, a fixed
 noise deterministically maps to a fixed image and reward.
 
-Two update strategies:
+Three update strategies:
 - "reward_weighted" (default): On-policy. Uses all samples from the current epoch
   with advantage-based weighting (analogous to GRPO). Every sample contributes:
   high-reward samples pull the prior toward them, low-reward samples push it away.
 - "cem": Cross-Entropy Method. Can use historical cached data. Only elite (top-k%)
   samples contribute to the update, discarding the rest.
+- "particle": Non-parametric. Reward-weighted resampling from cached noise buffer
+  + Gaussian perturbation. Can represent arbitrarily complex, multi-modal distributions.
 
-Both strategies support KL and interpolation regularization to prevent drift from N(0,I).
+reward_weighted and cem use GaussianPrior; particle uses ParticlePrior.
 """
 
 import os
@@ -281,3 +283,132 @@ class RewardCache:
     @property
     def total_samples(self) -> int:
         return self._count
+
+
+class ParticlePrior:
+    """Non-parametric prior via reward-weighted resampling + perturbation.
+
+    Instead of fitting a Gaussian, maintains a buffer of (noise, reward) pairs.
+    Sampling picks a noise from the buffer with probability proportional to
+    reward, then adds Gaussian perturbation for exploration. This can represent
+    arbitrarily complex, multi-modal distributions.
+
+    p_shaped(z) ∝ Σ_i  w_i · N(z | z_i, σ²I)
+
+    Falls back to N(0, I) when the buffer is empty (first epoch).
+    """
+
+    def __init__(
+        self,
+        shape: tuple,
+        device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype = torch.float32,
+        perturbation_std: float = 0.1,
+        temperature: float = 1.0,
+        mix_ratio: float = 0.1,
+    ):
+        self.shape = shape
+        self.device = device
+        self.dtype = dtype
+        self.perturbation_std = perturbation_std
+        self.temperature = temperature
+        self.mix_ratio = mix_ratio  # fraction of samples drawn from N(0,I) for exploration
+
+        # Buffer (populated via update())
+        self.noises = None    # (N, *shape)
+        self.rewards = None   # (N,) raw reward values
+        self.weights = None   # (N,) sampling probabilities
+
+    def sample(self, batch_size: int) -> torch.Tensor:
+        """Sample from particle prior, or N(0,I) if buffer is empty."""
+        if self.noises is None:
+            return torch.randn(batch_size, *self.shape, device=self.device, dtype=self.dtype)
+
+        # Split batch: some from N(0,I) for exploration, rest from buffer
+        n_explore = int(batch_size * self.mix_ratio)
+        n_exploit = batch_size - n_explore
+
+        samples = []
+
+        if n_exploit > 0:
+            # Reward-weighted resampling from buffer
+            idx = torch.multinomial(self.weights, n_exploit, replacement=True)
+            selected = self.noises[idx].to(self.device, dtype=self.dtype)
+            # Add perturbation
+            perturbation = torch.randn_like(selected) * self.perturbation_std
+            samples.append(selected + perturbation)
+
+        if n_explore > 0:
+            samples.append(torch.randn(n_explore, *self.shape, device=self.device, dtype=self.dtype))
+
+        return torch.cat(samples, dim=0)
+
+    def update(self, noises: torch.Tensor, rewards: np.ndarray) -> Dict[str, float]:
+        """Update particle buffer with new (noise, reward) pairs.
+
+        Appends to existing buffer and recomputes weights over ALL particles.
+        """
+        new_noises = noises.float().cpu()
+        new_rewards = torch.tensor(rewards, dtype=torch.float32)
+
+        if self.noises is None:
+            self.noises = new_noises
+            self.rewards = new_rewards
+        else:
+            self.noises = torch.cat([self.noises, new_noises], dim=0)
+            self.rewards = torch.cat([self.rewards, new_rewards], dim=0)
+
+        # Cap buffer (truncate both noises and rewards together)
+        max_particles = 50000
+        if len(self.noises) > max_particles:
+            self.noises = self.noises[-max_particles:]
+            self.rewards = self.rewards[-max_particles:]
+
+        # Compute advantage-based weights over ALL buffered rewards
+        adv = (self.rewards - self.rewards.mean()) / (self.rewards.std() + 1e-8)
+        self.weights = torch.softmax(adv / self.temperature, dim=0)
+
+        return self._compute_stats(self.rewards)
+
+    def update_from_cache(self, cache: 'RewardCache', max_epochs: int = -1) -> Dict[str, float]:
+        """Rebuild particle buffer from disk cache."""
+        all_noises, all_rewards = cache.load_recent(max_epochs=max_epochs)
+
+        self.noises = all_noises
+        r = torch.tensor(all_rewards, dtype=torch.float32)
+        self.rewards = r
+        # Advantage-based weighting
+        advantages = (r - r.mean()) / (r.std() + 1e-8)
+        self.weights = torch.softmax(advantages / self.temperature, dim=0)
+
+        return self._compute_stats(r)
+
+    def _compute_stats(self, rewards: torch.Tensor) -> Dict[str, float]:
+        return {
+            "reward_mean": float(rewards.mean()),
+            "reward_std": float(rewards.std()),
+            "reward_max": float(rewards.max()),
+            "reward_min": float(rewards.min()),
+            "buffer_size": len(self.noises),
+            "perturbation_std": self.perturbation_std,
+            "mix_ratio": self.mix_ratio,
+        }
+
+    def save(self, path: str):
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        torch.save({
+            "noises": self.noises,
+            "weights": self.weights,
+            "shape": self.shape,
+            "perturbation_std": self.perturbation_std,
+            "temperature": self.temperature,
+            "mix_ratio": self.mix_ratio,
+        }, path)
+
+    def load(self, path: str):
+        state = torch.load(path, map_location="cpu")
+        self.noises = state["noises"]
+        self.weights = state["weights"]
+        self.shape = tuple(state["shape"])
