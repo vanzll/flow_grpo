@@ -23,6 +23,7 @@ def _add_prior_config(config):
     prior.temperature = 1.0                  # softmax temperature (0 = hard top-k)
     prior.cache_dir = "cache/prior_shaping"  # disk cache for noise->reward pairs
     prior.use_cache_history = True           # use all historical data for CEM update
+    prior.max_cache_epochs = 50              # max epochs to load from cache (-1 = all)
     prior.resume_prior_path = ""             # path to a saved prior .pt file
 
     # Override training-related fields that are not needed

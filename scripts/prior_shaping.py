@@ -460,7 +460,9 @@ def main(_):
         update_stats = {}
         if accelerator.is_main_process:
             if config.prior.use_cache_history:
-                hist_noises, hist_rewards = cache.load_all()
+                hist_noises, hist_rewards = cache.load_recent(
+                    max_epochs=config.prior.max_cache_epochs
+                )
             else:
                 hist_noises = all_noises_cpu
                 hist_rewards = all_rewards_np

@@ -144,7 +144,9 @@ class GaussianPrior:
         return self._compute_kl(self.mu, self.sigma2)
 
     def save(self, path: str):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
         torch.save({
             "mu": self.mu,
             "sigma2": self.sigma2,
@@ -171,6 +173,15 @@ class RewardCache:
     def __init__(self, cache_dir: str):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
+        # In-memory sample count (avoids re-reading disk every time)
+        self._count = self._count_from_disk()
+
+    def _count_from_disk(self) -> int:
+        total = 0
+        for f in glob.glob(os.path.join(self.cache_dir, "epoch_*.npz")):
+            data = np.load(f)
+            total += len(data["rewards"])
+        return total
 
     def append(self, noises: torch.Tensor, rewards: np.ndarray, epoch: int):
         """Save one epoch's noise-reward pairs to disk."""
@@ -180,12 +191,15 @@ class RewardCache:
             noises=noises.cpu().to(torch.float16).numpy(),
             rewards=rewards.astype(np.float32),
         )
+        self._count += len(rewards)
 
-    def load_all(self) -> Tuple[torch.Tensor, np.ndarray]:
-        """Load and concatenate all cached epochs."""
+    def load_recent(self, max_epochs: int = -1) -> Tuple[torch.Tensor, np.ndarray]:
+        """Load cached epochs. If max_epochs > 0, only load the most recent N."""
         files = sorted(glob.glob(os.path.join(self.cache_dir, "epoch_*.npz")))
         if not files:
             raise RuntimeError(f"No cache files found in {self.cache_dir}")
+        if max_epochs > 0:
+            files = files[-max_epochs:]
 
         all_noises = []
         all_rewards = []
@@ -198,9 +212,4 @@ class RewardCache:
 
     @property
     def total_samples(self) -> int:
-        files = glob.glob(os.path.join(self.cache_dir, "epoch_*.npz"))
-        total = 0
-        for f in files:
-            data = np.load(f)
-            total += len(data["rewards"])
-        return total
+        return self._count
