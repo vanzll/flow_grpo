@@ -180,9 +180,9 @@ class GaussianPrior:
         }
 
     def _regularize_interpolation(self, mu_target: torch.Tensor, sigma2_target: torch.Tensor):
-        """Linear interpolation toward elite stats, anchored at N(0, I)."""
-        self.mu = self.alpha * mu_elite
-        self.sigma2 = (1 - self.alpha) * torch.ones_like(sigma2_elite) + self.alpha * sigma2_elite
+        """Linear interpolation toward target stats, anchored at N(0, I)."""
+        self.mu = self.alpha * mu_target
+        self.sigma2 = (1 - self.alpha) * torch.ones_like(sigma2_target) + self.alpha * sigma2_target
 
     def _regularize_kl(self, mu_target: torch.Tensor, sigma2_target: torch.Tensor):
         """Binary search for largest beta s.t. KL(N(beta*mu, (1-beta)+beta*sigma2) || N(0,I)) <= kl_max."""

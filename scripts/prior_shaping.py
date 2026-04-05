@@ -1,10 +1,10 @@
 """
-Prior Shaping via CEM for Flow Matching models.
+Prior Shaping for Flow Matching models.
 
-This script keeps the DiT frozen and optimizes the noise prior distribution
-using the Cross-Entropy Method (CEM). Since Flow Matching is an ODE, a fixed
-noise deterministically maps to a fixed image, so noise->reward mappings are
-permanently valid and cached to disk.
+This script keeps the DiT frozen and optimizes the noise prior distribution.
+Two update methods: reward-weighted (default, on-policy, GRPO-style) and CEM.
+Since Flow Matching is an ODE, a fixed noise deterministically maps to a fixed
+image, so noise->reward mappings are permanently valid and cached to disk.
 
 Usage:
     # 1 GPU
