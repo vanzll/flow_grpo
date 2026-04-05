@@ -315,8 +315,9 @@ class ParticlePrior:
         self.mix_ratio = mix_ratio  # fraction of samples drawn from N(0,I) for exploration
 
         # Buffer (populated via update())
-        self.noises = None   # (N, *shape)
-        self.weights = None  # (N,) sampling probabilities
+        self.noises = None    # (N, *shape)
+        self.rewards = None   # (N,) raw reward values
+        self.weights = None   # (N,) sampling probabilities
 
     def sample(self, batch_size: int) -> torch.Tensor:
         """Sample from particle prior, or N(0,I) if buffer is empty."""
@@ -345,31 +346,29 @@ class ParticlePrior:
     def update(self, noises: torch.Tensor, rewards: np.ndarray) -> Dict[str, float]:
         """Update particle buffer with new (noise, reward) pairs.
 
-        Appends to existing buffer and recomputes weights.
+        Appends to existing buffer and recomputes weights over ALL particles.
         """
         new_noises = noises.float().cpu()
         new_rewards = torch.tensor(rewards, dtype=torch.float32)
 
         if self.noises is None:
             self.noises = new_noises
-            all_rewards = new_rewards
+            self.rewards = new_rewards
         else:
             self.noises = torch.cat([self.noises, new_noises], dim=0)
-            # Need all rewards to recompute weights; for incremental update
-            # the script uses update_from_cache which loads all from disk.
-            # Here we just weight the new batch.
-            all_rewards = new_rewards
+            self.rewards = torch.cat([self.rewards, new_rewards], dim=0)
 
-        # Cap buffer
+        # Cap buffer (truncate both noises and rewards together)
         max_particles = 50000
         if len(self.noises) > max_particles:
             self.noises = self.noises[-max_particles:]
+            self.rewards = self.rewards[-max_particles:]
 
-        # Compute advantage-based weights
-        adv = (all_rewards - all_rewards.mean()) / (all_rewards.std() + 1e-8)
+        # Compute advantage-based weights over ALL buffered rewards
+        adv = (self.rewards - self.rewards.mean()) / (self.rewards.std() + 1e-8)
         self.weights = torch.softmax(adv / self.temperature, dim=0)
 
-        return self._compute_stats(new_rewards)
+        return self._compute_stats(self.rewards)
 
     def update_from_cache(self, cache: 'RewardCache', max_epochs: int = -1) -> Dict[str, float]:
         """Rebuild particle buffer from disk cache."""

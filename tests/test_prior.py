@@ -340,19 +340,31 @@ class TestParticlePrior:
         samples = prior.sample(10)
         assert samples.shape == (10, 4, 8, 8)
 
+    def test_incremental_update_keeps_buffer_consistent(self):
+        """Calling update() twice should grow buffer and keep weights aligned."""
+        prior = ParticlePrior(shape=(4,), perturbation_std=0.1, mix_ratio=0.0)
+        prior.update(torch.randn(20, 4), np.random.randn(20).astype(np.float32))
+        assert len(prior.noises) == 20
+        assert len(prior.weights) == 20
+        assert len(prior.rewards) == 20
+
+        prior.update(torch.randn(30, 4), np.random.randn(30).astype(np.float32))
+        assert len(prior.noises) == 50
+        assert len(prior.weights) == 50
+        assert len(prior.rewards) == 50
+
+        # Sampling should work without error
+        samples = prior.sample(10)
+        assert samples.shape == (10, 4)
+
     def test_high_reward_samples_are_favored(self):
         prior = ParticlePrior(shape=(1,), perturbation_std=0.01, mix_ratio=0.0, temperature=0.1)
         # One very high reward noise at +5, rest near 0
         noises = torch.randn(100, 1)
         noises[0] = 5.0
-        rewards = np.zeros(100)
+        rewards = np.zeros(100, dtype=np.float32)
         rewards[0] = 10.0  # Much higher than rest
         prior.update(noises, rewards)
-        # Rebuild weights manually
-        r = torch.tensor(rewards, dtype=torch.float32)
-        adv = (r - r.mean()) / (r.std() + 1e-8)
-        prior.weights = torch.softmax(adv / 0.1, dim=0)
-        prior.noises = noises
 
         samples = prior.sample(1000)
         # Most samples should be near +5
@@ -362,11 +374,8 @@ class TestParticlePrior:
         prior = ParticlePrior(shape=(4,), perturbation_std=0.01, mix_ratio=1.0)
         # All exploitation noise at +10
         noises = torch.ones(10, 4) * 10
-        rewards = np.ones(10)
+        rewards = np.ones(10, dtype=np.float32)
         prior.update(noises, rewards)
-        r = torch.tensor(rewards, dtype=torch.float32)
-        prior.weights = torch.ones(10) / 10
-        prior.noises = noises
 
         # With mix_ratio=1.0, all samples from N(0,I)
         samples = prior.sample(100)
