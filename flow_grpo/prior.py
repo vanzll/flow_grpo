@@ -173,24 +173,26 @@ class RewardCache:
     def __init__(self, cache_dir: str):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
-        # In-memory sample count (avoids re-reading disk every time)
         self._count = self._count_from_disk()
+        # Next file index: append-only, never overwrites on resume
+        self._next_idx = len(glob.glob(os.path.join(self.cache_dir, "epoch_*.npz")))
 
     def _count_from_disk(self) -> int:
         total = 0
         for f in glob.glob(os.path.join(self.cache_dir, "epoch_*.npz")):
-            data = np.load(f)
-            total += len(data["rewards"])
+            with np.load(f) as data:
+                total += len(data["rewards"])
         return total
 
     def append(self, noises: torch.Tensor, rewards: np.ndarray, epoch: int):
-        """Save one epoch's noise-reward pairs to disk."""
-        path = os.path.join(self.cache_dir, f"epoch_{epoch:06d}.npz")
+        """Save one epoch's noise-reward pairs to disk (append-only naming)."""
+        path = os.path.join(self.cache_dir, f"epoch_{self._next_idx:06d}.npz")
         np.savez_compressed(
             path,
             noises=noises.cpu().to(torch.float16).numpy(),
             rewards=rewards.astype(np.float32),
         )
+        self._next_idx += 1
         self._count += len(rewards)
 
     def load_recent(self, max_epochs: int = -1) -> Tuple[torch.Tensor, np.ndarray]:
@@ -204,9 +206,9 @@ class RewardCache:
         all_noises = []
         all_rewards = []
         for f in files:
-            data = np.load(f)
-            all_noises.append(torch.from_numpy(data["noises"].astype(np.float32)))
-            all_rewards.append(data["rewards"])
+            with np.load(f) as data:
+                all_noises.append(torch.from_numpy(data["noises"].astype(np.float32)))
+                all_rewards.append(data["rewards"].copy())
 
         return torch.cat(all_noises, dim=0), np.concatenate(all_rewards)
 
