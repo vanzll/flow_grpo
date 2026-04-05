@@ -223,7 +223,7 @@ class GaussianPrior:
         }, path)
 
     def load(self, path: str):
-        state = torch.load(path, map_location="cpu", weights_only=True)
+        state = torch.load(path, map_location="cpu")
         self.mu = state["mu"]
         self.sigma2 = state["sigma2"]
         self.shape = tuple(state["shape"])
