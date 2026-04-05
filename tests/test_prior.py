@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import pytest
 
-from flow_grpo.prior import GaussianPrior, RewardCache
+from flow_grpo.prior import GaussianPrior, ParticlePrior, RewardCache
 
 
 # ---------------------------------------------------------------------------
@@ -317,3 +317,90 @@ class TestRewardCacheResume:
         loaded, _ = cache.load_recent()
         # fp16 roundtrip: expect ~1e-3 precision for normal-range values
         torch.testing.assert_close(original, loaded, atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# ParticlePrior
+# ---------------------------------------------------------------------------
+
+class TestParticlePrior:
+    def test_sample_falls_back_to_n01_when_empty(self):
+        prior = ParticlePrior(shape=(4,))
+        samples = prior.sample(100)
+        assert samples.shape == (100, 4)
+        # Should be roughly N(0, 1)
+        assert samples.mean().abs().item() < 0.5
+        assert samples.std().item() == pytest.approx(1.0, abs=0.3)
+
+    def test_sample_shape_after_update(self):
+        prior = ParticlePrior(shape=(4, 8, 8), perturbation_std=0.1)
+        noises = torch.randn(50, 4, 8, 8)
+        rewards = np.random.randn(50)
+        prior.update(noises, rewards)
+        samples = prior.sample(10)
+        assert samples.shape == (10, 4, 8, 8)
+
+    def test_high_reward_samples_are_favored(self):
+        prior = ParticlePrior(shape=(1,), perturbation_std=0.01, mix_ratio=0.0, temperature=0.1)
+        # One very high reward noise at +5, rest near 0
+        noises = torch.randn(100, 1)
+        noises[0] = 5.0
+        rewards = np.zeros(100)
+        rewards[0] = 10.0  # Much higher than rest
+        prior.update(noises, rewards)
+        # Rebuild weights manually
+        r = torch.tensor(rewards, dtype=torch.float32)
+        adv = (r - r.mean()) / (r.std() + 1e-8)
+        prior.weights = torch.softmax(adv / 0.1, dim=0)
+        prior.noises = noises
+
+        samples = prior.sample(1000)
+        # Most samples should be near +5
+        assert samples.mean().item() > 3.0
+
+    def test_mix_ratio_produces_exploration(self):
+        prior = ParticlePrior(shape=(4,), perturbation_std=0.01, mix_ratio=1.0)
+        # All exploitation noise at +10
+        noises = torch.ones(10, 4) * 10
+        rewards = np.ones(10)
+        prior.update(noises, rewards)
+        r = torch.tensor(rewards, dtype=torch.float32)
+        prior.weights = torch.ones(10) / 10
+        prior.noises = noises
+
+        # With mix_ratio=1.0, all samples from N(0,I)
+        samples = prior.sample(100)
+        assert samples.mean().item() < 5.0  # Not all at +10
+
+    def test_update_from_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = RewardCache(tmpdir)
+            cache.append(torch.randn(20, 4), np.random.randn(20).astype(np.float32), epoch=0)
+            cache.append(torch.randn(20, 4), np.random.randn(20).astype(np.float32), epoch=1)
+
+            prior = ParticlePrior(shape=(4,))
+            stats = prior.update_from_cache(cache)
+            assert prior.noises is not None
+            assert len(prior.noises) == 40
+            assert prior.weights is not None
+            assert len(prior.weights) == 40
+            assert "buffer_size" in stats
+
+    def test_save_load_roundtrip(self):
+        prior = ParticlePrior(shape=(4,), perturbation_std=0.2, mix_ratio=0.05)
+        noises = torch.randn(30, 4)
+        rewards = np.random.randn(30)
+        prior.update(noises, rewards)
+        # Set weights properly
+        r = torch.tensor(rewards, dtype=torch.float32)
+        adv = (r - r.mean()) / (r.std() + 1e-8)
+        prior.weights = torch.softmax(adv / prior.temperature, dim=0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "particle.pt")
+            prior.save(path)
+
+            loaded = ParticlePrior(shape=(4,))
+            loaded.load(path)
+            assert torch.allclose(prior.noises, loaded.noises)
+            assert torch.allclose(prior.weights, loaded.weights)

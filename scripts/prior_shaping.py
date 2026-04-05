@@ -34,7 +34,7 @@ from diffusers import StableDiffusion3Pipeline
 import numpy as np
 import flow_grpo.rewards
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt
-from flow_grpo.prior import GaussianPrior, RewardCache
+from flow_grpo.prior import GaussianPrior, ParticlePrior, RewardCache
 import torch
 import torch.distributed as dist
 import wandb
@@ -125,16 +125,40 @@ def compute_text_embeddings(prompt, text_encoders, tokenizers, max_sequence_leng
 # Prior broadcast across distributed processes
 # ---------------------------------------------------------------------------
 
-def broadcast_prior(prior: GaussianPrior, accelerator: Accelerator):
+def broadcast_prior(prior, accelerator: Accelerator):
     """Broadcast prior parameters from rank 0 to all processes."""
     if accelerator.num_processes <= 1:
         return
-    mu = prior.mu.to(accelerator.device)
-    sigma2 = prior.sigma2.to(accelerator.device)
-    dist.broadcast(mu, src=0)
-    dist.broadcast(sigma2, src=0)
-    prior.mu = mu.cpu()
-    prior.sigma2 = sigma2.cpu()
+    if isinstance(prior, GaussianPrior):
+        mu = prior.mu.to(accelerator.device)
+        sigma2 = prior.sigma2.to(accelerator.device)
+        dist.broadcast(mu, src=0)
+        dist.broadcast(sigma2, src=0)
+        prior.mu = mu.cpu()
+        prior.sigma2 = sigma2.cpu()
+    elif isinstance(prior, ParticlePrior):
+        # Broadcast buffer size, then noises and weights
+        if prior.noises is not None:
+            size = torch.tensor([len(prior.noises)], device=accelerator.device)
+            dist.broadcast(size, src=0)
+            noises = prior.noises.to(accelerator.device)
+            weights = prior.weights.to(accelerator.device)
+            dist.broadcast(noises, src=0)
+            dist.broadcast(weights, src=0)
+            prior.noises = noises.cpu()
+            prior.weights = weights.cpu()
+        else:
+            # First epoch: nothing to broadcast
+            size = torch.tensor([0], device=accelerator.device)
+            dist.broadcast(size, src=0)
+            if size.item() > 0:
+                # Non-rank-0 receives buffer from rank 0
+                noises = torch.zeros(size.item(), *prior.shape, device=accelerator.device)
+                weights = torch.zeros(size.item(), device=accelerator.device)
+                dist.broadcast(noises, src=0)
+                dist.broadcast(weights, src=0)
+                prior.noises = noises.cpu()
+                prior.weights = weights.cpu()
 
 
 # ---------------------------------------------------------------------------
@@ -308,14 +332,24 @@ def main(_):
     latent_w = config.resolution // pipeline.vae_scale_factor
     latent_shape = (latent_channels, latent_h, latent_w)
 
-    prior = GaussianPrior(
-        shape=latent_shape,
-        device=accelerator.device,
-        dtype=inference_dtype,
-        regularization_mode=config.prior.regularization_mode,
-        alpha=config.prior.alpha,
-        kl_max=config.prior.kl_max,
-    )
+    if config.prior.update_method == "particle":
+        prior = ParticlePrior(
+            shape=latent_shape,
+            device=accelerator.device,
+            dtype=inference_dtype,
+            perturbation_std=config.prior.perturbation_std,
+            temperature=config.prior.temperature,
+            mix_ratio=config.prior.mix_ratio,
+        )
+    else:
+        prior = GaussianPrior(
+            shape=latent_shape,
+            device=accelerator.device,
+            dtype=inference_dtype,
+            regularization_mode=config.prior.regularization_mode,
+            alpha=config.prior.alpha,
+            kl_max=config.prior.kl_max,
+        )
     if config.prior.resume_prior_path:
         prior.load(config.prior.resume_prior_path)
         logger.info(f"Resumed prior from {config.prior.resume_prior_path}")
@@ -487,6 +521,11 @@ def main(_):
                     elite_ratio=config.prior.elite_ratio,
                     temperature=config.prior.temperature,
                 )
+            elif config.prior.update_method == "particle":
+                # Particle: rebuild buffer from all cached data
+                update_stats = prior.update_from_cache(
+                    cache, max_epochs=config.prior.max_cache_epochs
+                )
             else:
                 raise ValueError(f"Unknown update method: {config.prior.update_method}")
 
@@ -501,18 +540,25 @@ def main(_):
                 "reward_std": float(all_rewards_np.std()),
                 "reward_max": float(all_rewards_np.max()),
                 "reward_min": float(all_rewards_np.min()),
-                "prior_kl": prior.kl_from_standard_normal(),
-                "prior_mu_norm": float(prior.mu.norm()),
-                "prior_sigma_mean": float(prior.sigma2.sqrt().mean()),
                 "cache_total_samples": cache.total_samples,
             }
+            if isinstance(prior, GaussianPrior):
+                log_dict["prior_kl"] = prior.kl_from_standard_normal()
+                log_dict["prior_mu_norm"] = float(prior.mu.norm())
+                log_dict["prior_sigma_mean"] = float(prior.sigma2.sqrt().mean())
             log_dict.update({f"update_{k}": v for k, v in update_stats.items()})
             wandb.log(log_dict, step=epoch)
 
-            logger.info(
-                f"Epoch {epoch}: reward={all_rewards_np.mean():.4f} +/- {all_rewards_np.std():.4f}, "
-                f"KL={prior.kl_from_standard_normal():.4f}, cache={cache.total_samples}"
-            )
+            if isinstance(prior, GaussianPrior):
+                logger.info(
+                    f"Epoch {epoch}: reward={all_rewards_np.mean():.4f} +/- {all_rewards_np.std():.4f}, "
+                    f"KL={prior.kl_from_standard_normal():.4f}, cache={cache.total_samples}"
+                )
+            else:
+                logger.info(
+                    f"Epoch {epoch}: reward={all_rewards_np.mean():.4f} +/- {all_rewards_np.std():.4f}, "
+                    f"buffer={update_stats.get('buffer_size', 0)}, cache={cache.total_samples}"
+                )
 
     # Final save
     if accelerator.is_main_process:
