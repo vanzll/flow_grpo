@@ -18,6 +18,10 @@ import os
 base = imp.load_source("base", os.path.join(os.path.dirname(__file__), "base.py"))
 
 
+def get_config(name):
+    return globals()[name]()
+
+
 def _add_prior_config(config):
     """Add prior-shaping-specific fields to an existing base config."""
     config.prior = prior = ml_collections.ConfigDict()
@@ -88,4 +92,21 @@ def pickscore_sd3_prior_4gpu():
     config.sample.num_batches_per_epoch = 8
     config.sample.test_batch_size = 16
     config.save_dir = "logs/prior_shaping/pickscore_4gpu"
+    return config
+
+
+def pickscore_sd3_prior_4gpu_smoke():
+    """Minimal 4-GPU smoke test: 2 epochs, 2 batches, few steps."""
+    config = pickscore_sd3_prior_1gpu()
+    config.sample.train_batch_size = 2
+    config.sample.num_image_per_prompt = 2
+    config.sample.num_batches_per_epoch = 1
+    config.sample.num_steps = 5
+    config.sample.eval_num_steps = 5
+    config.sample.test_batch_size = 2
+    config.num_epochs = 2
+    config.eval_freq = 1
+    config.save_freq = 2
+    config.save_dir = "logs/prior_shaping/smoke_4gpu"
+    config.prior.cache_dir = "cache/prior_shaping_smoke"
     return config

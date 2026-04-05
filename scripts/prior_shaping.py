@@ -142,7 +142,7 @@ def broadcast_prior(prior: GaussianPrior, accelerator: Accelerator):
 # ---------------------------------------------------------------------------
 
 def run_eval(pipeline, prior, test_dataloader, text_encoders, tokenizers, config,
-             accelerator, epoch, reward_fn, executor):
+             accelerator, epoch, reward_fn, executor, autocast):
     """Evaluate shaped prior on test set. Logs images and rewards to W&B."""
     neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings(
         [""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device
@@ -170,19 +170,20 @@ def run_eval(pipeline, prior, test_dataloader, text_encoders, tokenizers, config
 
         # Sample from shaped prior and generate via ODE
         noise = prior.sample(batch_size).to(accelerator.device, dtype=pipeline.transformer.dtype)
-        with torch.no_grad():
-            images = pipeline(
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_prompt_embeds=neg_embeds,
-                negative_pooled_prompt_embeds=neg_pooled,
-                latents=noise,
-                num_inference_steps=config.sample.eval_num_steps,
-                guidance_scale=config.sample.guidance_scale,
-                output_type="pt",
-                height=config.resolution,
-                width=config.resolution,
-            ).images
+        with autocast():
+            with torch.no_grad():
+                images = pipeline(
+                    prompt_embeds=prompt_embeds,
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    negative_prompt_embeds=neg_embeds,
+                    negative_pooled_prompt_embeds=neg_pooled,
+                    latents=noise,
+                    num_inference_steps=config.sample.eval_num_steps,
+                    guidance_scale=config.sample.guidance_scale,
+                    output_type="pt",
+                    height=config.resolution,
+                    width=config.resolution,
+                ).images
 
         rewards_future = executor.submit(reward_fn, images, prompts, prompt_metadata, only_strict=False)
         time.sleep(0)
@@ -362,6 +363,9 @@ def main(_):
     sample_neg_prompt_embeds = neg_prompt_embed.repeat(config.sample.train_batch_size, 1, 1)
     sample_neg_pooled_prompt_embeds = neg_pooled_prompt_embed.repeat(config.sample.train_batch_size, 1)
 
+    # autocast is needed for mixed precision pipeline calls (fp16 latents + fp32 VAE)
+    autocast = accelerator.autocast
+
     # ---- Logging ----
     samples_per_epoch = (
         config.sample.train_batch_size * accelerator.num_processes * config.sample.num_batches_per_epoch
@@ -384,7 +388,7 @@ def main(_):
         if epoch % config.eval_freq == 0:
             run_eval(
                 pipeline, prior, test_dataloader, text_encoders, tokenizers,
-                config, accelerator, epoch, eval_reward_fn, executor,
+                config, accelerator, epoch, eval_reward_fn, executor, autocast,
             )
 
         # ---- Save prior (periodic) ----
@@ -414,19 +418,20 @@ def main(_):
             noise = prior.sample(len(prompts)).to(accelerator.device, dtype=inference_dtype)
 
             # Generate via vanilla SD3 pipeline (ODE, deterministic)
-            with torch.no_grad():
-                images = pipeline(
-                    prompt_embeds=prompt_embeds,
-                    pooled_prompt_embeds=pooled_prompt_embeds,
-                    negative_prompt_embeds=sample_neg_prompt_embeds[:len(prompts)],
-                    negative_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds[:len(prompts)],
-                    latents=noise,
-                    num_inference_steps=config.sample.num_steps,
-                    guidance_scale=config.sample.guidance_scale,
-                    output_type="pt",
-                    height=config.resolution,
-                    width=config.resolution,
-                ).images
+            with autocast():
+                with torch.no_grad():
+                    images = pipeline(
+                        prompt_embeds=prompt_embeds,
+                        pooled_prompt_embeds=pooled_prompt_embeds,
+                        negative_prompt_embeds=sample_neg_prompt_embeds[:len(prompts)],
+                        negative_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds[:len(prompts)],
+                        latents=noise,
+                        num_inference_steps=config.sample.num_steps,
+                        guidance_scale=config.sample.guidance_scale,
+                        output_type="pt",
+                        height=config.resolution,
+                        width=config.resolution,
+                    ).images
 
             # Async reward computation
             reward_future = executor.submit(reward_fn, images, prompts, prompt_metadata, only_strict=True)
