@@ -161,3 +161,60 @@ scripts/prior_shaping.py    # 主脚本（镜像 train_sd3.py 结构）
 tests/test_prior.py         # 单元测试（34 个）
 cache/                      # 噪声-reward 缓存（.gitignore）
 ```
+
+## Prior Policy Network（轻量策略网络）
+
+与 Prior Shaping（直接修改分布参数）不同，Prior Policy 训练一个小型神经网络 `π_φ(z|prompt)` 来输出 prompt-conditioned 的噪声分布。DiT 完全冻结，只训练这个轻量网络（~2M 参数）。
+
+### 核心区别
+
+```
+Flow-GRPO:     z ~ N(0,I) → DiT_θ(z, prompt) → image    训练 DiT（LoRA）
+Prior Policy:  z ~ π_φ(·|prompt) → DiT(z, prompt) → image  训练 policy network
+```
+
+### 运行方式
+
+```bash
+# 单卡
+accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml \
+  --num_processes=1 --main_process_port 29501 \
+  scripts/train_prior_policy.py --config config/prior_policy.py:pickscore_sd3_policy_1gpu
+
+# 4卡
+NCCL_P2P_DISABLE=1 accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml \
+  --num_processes=4 --main_process_port 29501 \
+  scripts/train_prior_policy.py --config config/prior_policy.py:pickscore_sd3_policy_4gpu
+
+# 8卡 H20
+accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml \
+  --num_processes=8 --main_process_port 29501 \
+  scripts/train_prior_policy.py --config config/prior_policy.py:pickscore_sd3_policy_8gpu_h20
+```
+
+### 训练方式：Advantage-Weighted Regression
+
+```python
+loss = -Σ w_i · log π_φ(z_i | prompt_i)   # 加权最大似然
+w_i = softmax(advantage_i / temperature)    # GRPO advantage 做权重
+```
+
+### 关键配置参数
+
+```python
+config.policy.type = "gaussian"          # 策略类型（目前支持 gaussian，后续加 normalizing_flow）
+config.policy.hidden_dim = 512           # 网络隐藏层维度
+config.policy.learning_rate = 1e-4       # 学习率
+config.policy.temperature = 1.0          # advantage softmax 温度
+config.policy.kl_weight = 0.01           # KL(π||N(0,I)) 正则化，防止方差塌缩
+config.policy.train_every_n_epochs = 1   # 每 N epoch 训练一次
+```
+
+### 项目结构（Prior Policy 相关）
+
+```
+config/prior_policy.py        # 实验配置（1/4/8 GPU + smoke test）
+flow_grpo/prior_policy.py     # GaussianPolicy 网络定义 + AWR loss
+scripts/train_prior_policy.py # 主训练脚本
+tests/test_prior_policy.py    # 单元测试（15 个）
+```
