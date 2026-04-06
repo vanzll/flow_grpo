@@ -25,7 +25,7 @@ def _add_policy_config(config):
     policy.weight_decay = 1e-4
     policy.temperature = 1.0                 # softmax temperature for advantage weighting
     policy.train_every_n_epochs = 1          # train policy every N epochs
-    policy.kl_weight = 0.0                   # optional KL(π||N(0,I)) regularization weight
+    policy.kl_weight = 0.01                  # KL(π||N(0,I)) regularization to prevent variance collapse
     policy.cache_dir = "cache/prior_policy"  # disk cache for (prompt, noise, reward, advantage)
     policy.resume_path = ""                  # path to saved policy checkpoint
 

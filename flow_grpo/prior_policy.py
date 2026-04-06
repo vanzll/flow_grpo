@@ -140,7 +140,7 @@ class GaussianPolicy(nn.Module):
 
 
 def compute_awr_loss(
-    policy: GaussianPolicy,
+    policy,
     noises: torch.Tensor,
     pooled_prompt_embeds: torch.Tensor,
     prompt_embeds: torch.Tensor,
@@ -149,29 +149,44 @@ def compute_awr_loss(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Advantage-Weighted Regression loss.
 
-    loss = -Σ w_i · log π_φ(z_i | prompt_i)
+    loss = -Σ w_i · log_prob_per_dim_i
     w_i = softmax(advantage_i / temperature)
 
+    Advantages are already per-prompt normalized (GRPO-style), so we use them
+    directly as weights via softmax over the full batch. The per-prompt
+    normalization ensures advantages are comparable across prompts.
+
+    Log-prob is normalized by dimensionality to keep loss magnitude reasonable.
+
     Args:
-        policy: the prior policy network
+        policy: the prior policy network (can be DDP-wrapped)
         noises: (B, C, H, W) sampled noises
         pooled_prompt_embeds: (B, pooled_dim)
         prompt_embeds: (B, seq_len, embed_dim)
-        advantages: (B,) GRPO-style advantages
+        advantages: (B,) GRPO-style per-prompt normalized advantages
         temperature: softmax temperature
 
     Returns:
         loss: scalar
         stats: dict of training statistics
     """
+    B = noises.shape[0]
+    num_dims = noises.shape[1] * noises.shape[2] * noises.shape[3]
+
     # Compute weights from advantages
     weights = torch.softmax(advantages / temperature, dim=0)  # (B,)
 
-    # Compute log-prob under current policy
-    log_probs = policy.log_prob(noises, pooled_prompt_embeds, prompt_embeds)  # (B,)
+    # Compute log-prob via forward() (DDP-compatible)
+    mu, log_sigma = policy(pooled_prompt_embeds, prompt_embeds)
+    var = (2 * log_sigma).exp()
+    log_probs = -0.5 * ((noises - mu) ** 2 / var + 2 * log_sigma + math.log(2 * math.pi))
+    log_probs = log_probs.sum(dim=(1, 2, 3))  # (B,)
+
+    # Normalize by dimensionality to keep loss/gradient magnitudes reasonable
+    log_probs_normalized = log_probs / num_dims
 
     # Weighted NLL
-    loss = -(weights * log_probs).sum()
+    loss = -(weights * log_probs_normalized).sum()
 
     # Stats for logging
     with torch.no_grad():
@@ -179,7 +194,7 @@ def compute_awr_loss(
         stats = {
             "policy_loss": loss.item(),
             "log_prob_mean": log_probs.mean().item(),
-            "log_prob_std": log_probs.std().item(),
+            "log_prob_per_dim": log_probs_normalized.mean().item(),
             "weight_max": weights.max().item(),
             "weight_min": weights.min().item(),
             "effective_sample_size": effective_sample_size.item(),

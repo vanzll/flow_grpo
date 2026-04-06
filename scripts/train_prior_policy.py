@@ -522,13 +522,20 @@ def main(_):
 
             # Optional KL regularization
             if config.policy.kl_weight > 0:
-                kl = policy.module.kl_from_standard_normal(train_ppe, train_pe) if hasattr(policy, 'module') else policy.kl_from_standard_normal(train_ppe, train_pe)
+                mu_kl, log_sigma_kl = policy(train_ppe, train_pe)
+                sigma2_kl = (2 * log_sigma_kl).exp()
+                kl = 0.5 * (sigma2_kl + mu_kl ** 2 - 1 - 2 * log_sigma_kl).sum(dim=(1,2,3)).mean()
                 loss = loss + config.policy.kl_weight * kl
 
             # Backward
             optimizer.zero_grad()
             accelerator.backward(loss)
-            grad_norm = torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+            # Manual grad clip (accelerator.clip_grad_norm_ has bugs with 4D conv params)
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                [p for p in policy.parameters() if p.grad is not None],
+                max_norm=1.0, norm_type=2.0, error_if_nonfinite=False,
+            )
+            grad_norm = total_norm if isinstance(total_norm, torch.Tensor) else torch.tensor(total_norm)
             optimizer.step()
             global_step += 1
 
@@ -554,7 +561,7 @@ def main(_):
                     # Policy
                     "policy_loss": awr_stats["policy_loss"],
                     "policy_log_prob_mean": awr_stats["log_prob_mean"],
-                    "policy_mu_norm": float(mu.norm(dim=(1,2,3)).mean()),
+                    "policy_mu_norm": float(mu.flatten(1).norm(dim=1).mean()),
                     "policy_sigma_mean": float(log_sigma.exp().mean()),
                     "policy_kl_from_n01": float(policy_kl),
                     "policy_entropy": float(policy_entropy),
