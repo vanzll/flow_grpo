@@ -137,28 +137,26 @@ def broadcast_prior(prior, accelerator: Accelerator):
         prior.mu = mu.cpu()
         prior.sigma2 = sigma2.cpu()
     elif isinstance(prior, ParticlePrior):
-        # Broadcast buffer size, then noises and weights
-        if prior.noises is not None:
-            size = torch.tensor([len(prior.noises)], device=accelerator.device)
-            dist.broadcast(size, src=0)
-            noises = prior.noises.to(accelerator.device)
-            weights = prior.weights.to(accelerator.device)
+        # Broadcast buffer size first (rank 0 sends, others receive)
+        if accelerator.is_main_process:
+            size = torch.tensor([len(prior.noises) if prior.noises is not None else 0],
+                                device=accelerator.device)
+        else:
+            size = torch.tensor([0], device=accelerator.device)
+        dist.broadcast(size, src=0)
+        n = size.item()
+        if n > 0:
+            # Rank 0: send actual data; others: allocate matching receive buffer
+            if accelerator.is_main_process:
+                noises = prior.noises.to(accelerator.device)
+                weights = prior.weights.to(accelerator.device)
+            else:
+                noises = torch.zeros(n, *prior.shape, device=accelerator.device)
+                weights = torch.zeros(n, device=accelerator.device)
             dist.broadcast(noises, src=0)
             dist.broadcast(weights, src=0)
             prior.noises = noises.cpu()
             prior.weights = weights.cpu()
-        else:
-            # First epoch: nothing to broadcast
-            size = torch.tensor([0], device=accelerator.device)
-            dist.broadcast(size, src=0)
-            if size.item() > 0:
-                # Non-rank-0 receives buffer from rank 0
-                noises = torch.zeros(size.item(), *prior.shape, device=accelerator.device)
-                weights = torch.zeros(size.item(), device=accelerator.device)
-                dist.broadcast(noises, src=0)
-                dist.broadcast(weights, src=0)
-                prior.noises = noises.cpu()
-                prior.weights = weights.cpu()
 
 
 # ---------------------------------------------------------------------------
