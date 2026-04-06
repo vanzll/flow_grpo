@@ -510,9 +510,9 @@ def main(_):
             train_ppe = all_pooled_embeds.to(accelerator.device)
             train_advantages = advantages.to(accelerator.device)
 
-            # Forward + loss
+            # Forward + loss (use DDP-wrapped policy for gradient sync)
             loss, awr_stats = compute_awr_loss(
-                accelerator.unwrap_model(policy),
+                policy,
                 train_noises,
                 train_ppe,
                 train_pe,
@@ -522,7 +522,7 @@ def main(_):
 
             # Optional KL regularization
             if config.policy.kl_weight > 0:
-                kl = accelerator.unwrap_model(policy).kl_from_standard_normal(train_ppe, train_pe)
+                kl = policy.module.kl_from_standard_normal(train_ppe, train_pe) if hasattr(policy, 'module') else policy.kl_from_standard_normal(train_ppe, train_pe)
                 loss = loss + config.policy.kl_weight * kl
 
             # Backward

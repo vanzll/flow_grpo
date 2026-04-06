@@ -50,8 +50,8 @@ class GaussianPolicy(nn.Module):
 
         # Spatial decoder: hidden → (C, H, W) for both μ and log_σ
         # Compute number of upsample stages needed: 4 → H (each stage doubles)
-        import math as _math
-        num_upsample = int(_math.log2(H // 4))  # e.g., H=64 → 4 stages, H=8 → 1 stage
+        assert H == W, f"Non-square latents not supported: H={H}, W={W}"
+        num_upsample = int(math.log2(H // 4))  # e.g., H=64 → 4 stages, H=8 → 1 stage
         assert 4 * (2 ** num_upsample) == H, f"H={H} must be 4 * 2^n"
 
         self.spatial_proj = nn.Linear(hidden_dim, hidden_dim * 4 * 4)
