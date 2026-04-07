@@ -92,6 +92,33 @@ def pickscore_sd3_policy_8gpu_h20():
     return config
 
 
+def pickscore_sd3_transformer_8gpu_h20():
+    """8x H20 96GB config for Transformer prior policy.
+
+    Transformer policy (~23M params) with cross-attention over text tokens.
+    8*16*8 = 1024 samples per epoch, 16 per prompt group.
+    H20 96GB: DiT ~9GB + Transformer policy ~0.1GB + batch data ~2GB = ~11GB per card.
+    """
+    config = pickscore_sd3_policy_1gpu()
+    config.policy.type = "transformer"
+    config.policy.hidden_dim = 512
+    config.policy.num_heads = 8
+    config.policy.num_layers = 4
+    config.policy.spatial_res = 8
+
+    config.sample.train_batch_size = 16
+    config.sample.num_image_per_prompt = 16
+    config.sample.num_batches_per_epoch = 8
+    config.sample.test_batch_size = 32
+
+    config.num_epochs = 200
+    config.eval_freq = 10
+    config.save_freq = 20
+    config.policy.cache_dir = "cache/prior_policy_transformer_8gpu"
+    config.save_dir = "logs/prior_policy/transformer_8gpu_h20"
+    return config
+
+
 def pickscore_sd3_policy_4gpu_smoke():
     """Minimal smoke test."""
     config = pickscore_sd3_policy_1gpu()
