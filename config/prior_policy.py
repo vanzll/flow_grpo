@@ -28,6 +28,10 @@ def _add_policy_config(config):
     policy.kl_weight = 0.01                  # KL(π||N(0,I)) regularization to prevent variance collapse
     policy.cache_dir = "cache/prior_policy"  # disk cache for (prompt, noise, reward, advantage)
     policy.resume_path = ""                  # path to saved policy checkpoint
+    # Transformer-specific (only used when type="transformer")
+    policy.num_heads = 8                     # number of attention heads
+    policy.num_layers = 4                    # number of transformer layers
+    policy.spatial_res = 8                   # spatial resolution of query grid (8×8=64 queries)
 
     # Override training-related fields that are not needed for DiT
     config.use_lora = False

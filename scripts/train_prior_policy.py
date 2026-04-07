@@ -33,7 +33,7 @@ from diffusers import StableDiffusion3Pipeline
 import numpy as np
 import flow_grpo.rewards
 from flow_grpo.diffusers_patch.train_dreambooth_lora_sd3 import encode_prompt
-from flow_grpo.prior_policy import GaussianPolicy, compute_awr_loss
+from flow_grpo.prior_policy import build_policy, compute_awr_loss
 from flow_grpo.stat_tracking import PerPromptStatTracker
 import torch
 import wandb
@@ -298,12 +298,7 @@ def main(_):
     del dummy_pe, dummy_ppe
 
     # ---- Policy network ----
-    policy = GaussianPolicy(
-        prompt_embed_dim=pooled_embed_dim,
-        seq_embed_dim=seq_embed_dim,
-        latent_shape=latent_shape,
-        hidden_dim=config.policy.hidden_dim,
-    ).to(accelerator.device)
+    policy = build_policy(config, pooled_embed_dim, seq_embed_dim, latent_shape).to(accelerator.device)
 
     if config.policy.resume_path:
         policy.load_state_dict(torch.load(config.policy.resume_path, map_location=accelerator.device))
