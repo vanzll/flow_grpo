@@ -121,8 +121,8 @@ def compute_text_embeddings(prompt, text_encoders, tokenizers, max_sequence_leng
 # ---------------------------------------------------------------------------
 
 def run_eval(pipeline, policy, test_dataloader, text_encoders, tokenizers, config,
-             accelerator, epoch, reward_fn, executor, autocast):
-    """Evaluate policy on test set."""
+             accelerator, epoch, reward_fn, executor, autocast, prefix="eval"):
+    """Evaluate policy on a dataset. prefix controls W&B metric names."""
     policy.eval()
     neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings(
         [""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device
@@ -203,7 +203,7 @@ def run_eval(pipeline, policy, test_dataloader, text_encoders, tokenizers, confi
             ]
             wandb.log(
                 {
-                    "eval_images": [
+                    f"{prefix}_images": [
                         wandb.Image(
                             os.path.join(tmpdir, f"{idx}.jpg"),
                             caption=f"{prompt:.1000} | " + " | ".join(
@@ -212,7 +212,7 @@ def run_eval(pipeline, policy, test_dataloader, text_encoders, tokenizers, confi
                         )
                         for idx, (prompt, reward) in enumerate(zip(sampled_prompts, sampled_rewards))
                     ],
-                    **{f"eval_reward_{key}": np.mean(value[value != -10]) for key, value in all_rewards.items()},
+                    **{f"{prefix}_reward_{key}": np.mean(value[value != -10]) for key, value in all_rewards.items()},
                 },
                 step=epoch,
             )
@@ -339,9 +339,18 @@ def main(_):
         collate_fn=TextPromptDataset.collate_fn, shuffle=False, num_workers=8,
     )
 
+    # Train eval dataloader (first 2048 prompts of train set for evaluation)
+    from torch.utils.data import Subset
+    train_eval_size = min(2048, len(train_dataset))
+    train_eval_subset = Subset(train_dataset, range(train_eval_size))
+    train_eval_dataloader = DataLoader(
+        train_eval_subset, batch_size=config.sample.test_batch_size,
+        collate_fn=TextPromptDataset.collate_fn, shuffle=False, num_workers=8,
+    )
+
     # Wrap with accelerator
-    policy, optimizer, train_dataloader, test_dataloader = accelerator.prepare(
-        policy, optimizer, train_dataloader, test_dataloader
+    policy, optimizer, train_dataloader, test_dataloader, train_eval_dataloader = accelerator.prepare(
+        policy, optimizer, train_dataloader, test_dataloader, train_eval_dataloader
     )
 
     # Negative prompt embeddings for CFG
@@ -385,9 +394,17 @@ def main(_):
         # ---- Eval (periodic) ----
         if epoch % config.eval_freq == 0:
             unwrapped_policy = accelerator.unwrap_model(policy)
+            # Eval on test set (generalization)
             run_eval(
                 pipeline, unwrapped_policy, test_dataloader, text_encoders, tokenizers,
                 config, accelerator, epoch, eval_reward_fn, executor, autocast,
+                prefix="eval",
+            )
+            # Eval on train set (RL performance)
+            run_eval(
+                pipeline, unwrapped_policy, train_eval_dataloader, text_encoders, tokenizers,
+                config, accelerator, epoch, eval_reward_fn, executor, autocast,
+                prefix="train_eval",
             )
 
         # ---- Save (periodic) ----
