@@ -105,6 +105,9 @@ def pickscore_sd3_transformer_8gpu_h20():
     config.policy.num_heads = 8
     config.policy.num_layers = 4
     config.policy.spatial_res = 8
+    config.policy.learning_rate = 3e-5       # lower LR for Transformer (vs 1e-4 for MLP)
+    config.policy.temperature = 0.5          # sharper advantage weighting for stronger signal
+    config.policy.kl_weight = 0.01           # prevent variance collapse
 
     config.sample.train_batch_size = 16
     config.sample.num_image_per_prompt = 16
