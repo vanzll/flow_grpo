@@ -509,9 +509,9 @@ def main(_):
             .to(accelerator.device)
         )
 
-        # ---- Cache to disk (rank 0 only) ----
+        # ---- Cache to disk (all ranks must participate in gather) ----
+        all_noises_gathered = accelerator.gather(local_noises.to(accelerator.device)).cpu()
         if accelerator.is_main_process:
-            all_noises_gathered = accelerator.gather(local_noises.to(accelerator.device)).cpu()
             cache_path = os.path.join(cache_dir, f"epoch_{epoch:06d}.npz")
             np.savez_compressed(
                 cache_path,
@@ -520,8 +520,6 @@ def main(_):
                 advantages=advantages.numpy().astype(np.float32),
                 prompt_ids=all_prompt_ids.astype(np.int32),
             )
-        if accelerator.num_processes > 1:
-            torch.distributed.barrier()
 
         # ---- Train policy on LOCAL shard (proper DDP) ----
         if epoch % config.policy.train_every_n_epochs == 0:
