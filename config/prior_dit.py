@@ -74,7 +74,7 @@ def pickscore_sd3_dit_4gpu():
     config.sample.train_batch_size = 8
     config.sample.num_image_per_prompt = 8
     config.sample.num_batches_per_epoch = 8
-    config.sample.test_batch_size = 16
+    config.sample.test_batch_size = 8  # keep small to avoid OOM with CFG (effective batch 16)
     config.save_dir = "logs/prior_dit/pickscore_4gpu"
     return config
 

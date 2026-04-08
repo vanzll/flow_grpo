@@ -220,8 +220,8 @@ def compute_dit_awr_loss(
     t_expand = t[:, None, None, None]
     z_t = (1 - t_expand) * epsilon + t_expand * z
 
-    # Target velocity: straight line from ε to z
-    v_target = z - epsilon
+    # Target velocity: dz_sigma/dsigma = d/dsigma[sigma*eps + (1-sigma)*z] = eps - z
+    v_target = epsilon - z
 
     # CFG training: randomly drop prompt
     if cfg_drop_rate > 0 and model.training:
