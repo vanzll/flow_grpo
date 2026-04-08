@@ -196,6 +196,7 @@ def compute_dit_awr_loss(
     temperature: float = 1.0,
     cfg_drop_rate: float = 0.0,
     adv_clip_max: float = 5.0,
+    v_reg_weight: float = 0.01,
     null_prompt_embeds: Optional[torch.Tensor] = None,
     null_pooled_prompt_embeds: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
@@ -263,12 +264,20 @@ def compute_dit_awr_loss(
 
     # Advantage-weighted loss
     weights = advantages / temperature
-    loss = (weights * mse).mean()
+    awr_loss = (weights * mse).mean()
+
+    # Regularization: penalize velocity magnitude to keep z close to ε (≈ N(0,I))
+    # ||v_pred||² penalty: if v_pred ≈ 0, then ODE is identity (z ≈ ε)
+    # This prevents z from drifting away from the N(0,I) sphere
+    v_reg = (v_pred ** 2).mean()
+    loss = awr_loss + v_reg_weight * v_reg
 
     # Stats
     with torch.no_grad():
         stats = {
             "dit_loss": loss.item(),
+            "dit_awr_loss": awr_loss.item(),
+            "dit_v_reg": v_reg.item(),
             "dit_mse_mean": mse.mean().item(),
             "advantage_max": advantages.max().item(),
             "advantage_min": advantages.min().item(),

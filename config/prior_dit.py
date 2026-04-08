@@ -29,6 +29,7 @@ def _add_prior_dit_config(config):
     dit.cfg_drop_rate = 0.1             # CFG training: probability of dropping prompt
     dit.cfg_scale = 4.5                 # CFG inference guidance scale
     dit.temperature = 1.0               # advantage scaling
+    dit.v_reg_weight = 0.01             # velocity regularization: penalize ||v_pred||² to keep z ≈ ε
     dit.train_every_n_epochs = 1
     dit.cache_dir = "cache/prior_dit"
     dit.resume_path = ""

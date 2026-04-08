@@ -532,6 +532,7 @@ def main(_):
                     prior_dit, mb_eps, mb_z, mb_pe, mb_ppe, mb_adv,
                     temperature=dit_config.temperature,
                     cfg_drop_rate=dit_config.cfg_drop_rate,
+                    v_reg_weight=dit_config.v_reg_weight,
                 )
                 # Scale loss for gradient accumulation
                 loss = loss / num_mini
