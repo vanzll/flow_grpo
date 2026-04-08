@@ -508,28 +508,36 @@ def main(_):
                 prompt_ids=all_prompt_ids.astype(np.int32),
             )
 
-        # ---- Train prior DiT ----
+        # ---- Train prior DiT (mini-batch to avoid OOM) ----
         if epoch % dit_config.train_every_n_epochs == 0:
             prior_dit.train()
-
-            train_eps = all_epsilons.to(accelerator.device)
-            train_z = all_noises.to(accelerator.device)
-            train_pe = all_prompt_embeds.to(accelerator.device)
-            train_ppe = all_pooled_embeds.to(accelerator.device)
-            train_adv = advantages.to(accelerator.device)
-
-            # AWR flow matching loss
-            loss, dit_stats = compute_dit_awr_loss(
-                prior_dit,
-                train_eps, train_z,
-                train_pe, train_ppe,
-                train_adv,
-                temperature=dit_config.temperature,
-                cfg_drop_rate=dit_config.cfg_drop_rate,
-            )
-
             optimizer.zero_grad()
-            accelerator.backward(loss)
+
+            N = len(all_epsilons)
+            mini_bs = min(16, N)  # process 16 samples at a time
+            num_mini = (N + mini_bs - 1) // mini_bs
+            total_loss = 0.0
+            last_stats = {}
+
+            for mi in range(num_mini):
+                s = mi * mini_bs
+                e = min(s + mini_bs, N)
+                mb_eps = all_epsilons[s:e].to(accelerator.device)
+                mb_z = all_noises[s:e].to(accelerator.device)
+                mb_pe = all_prompt_embeds[s:e].to(accelerator.device)
+                mb_ppe = all_pooled_embeds[s:e].to(accelerator.device)
+                mb_adv = advantages[s:e].to(accelerator.device)
+
+                loss, last_stats = compute_dit_awr_loss(
+                    prior_dit, mb_eps, mb_z, mb_pe, mb_ppe, mb_adv,
+                    temperature=dit_config.temperature,
+                    cfg_drop_rate=dit_config.cfg_drop_rate,
+                )
+                # Scale loss for gradient accumulation
+                loss = loss / num_mini
+                accelerator.backward(loss)
+                total_loss += loss.item()
+
             total_norm = torch.nn.utils.clip_grad_norm_(
                 [p for p in prior_dit.parameters() if p.grad is not None],
                 max_norm=1.0, norm_type=2.0, error_if_nonfinite=False,
@@ -537,6 +545,8 @@ def main(_):
             grad_norm = total_norm if isinstance(total_norm, torch.Tensor) else torch.tensor(total_norm)
             optimizer.step()
             global_step += 1
+            dit_stats = last_stats
+            dit_stats["dit_loss"] = total_loss
 
             # ---- Log ----
             if accelerator.is_main_process:

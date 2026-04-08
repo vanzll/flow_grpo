@@ -603,7 +603,7 @@ def main(_):
                 logger.info(
                     f"Epoch {epoch}: reward={all_rewards.mean():.4f} ± {all_rewards.std():.4f}, "
                     f"loss={awr_stats['policy_loss']:.4f}, "
-                    f"KL={float(policy_kl):.2f}, σ={float(log_sigma.exp().mean()):.4f}"
+                    f"KL={float(kl_sum):.2f}, σ={float(sigma.mean()):.4f}"
                 )
 
     # Final save
