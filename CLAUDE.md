@@ -195,17 +195,19 @@ accelerate launch --config_file scripts/accelerate_configs/multi_gpu.yaml \
 ### 训练方式：Advantage-Weighted Regression
 
 ```python
-loss = -Σ w_i · log π_φ(z_i | prompt_i)   # 加权最大似然
-w_i = softmax(advantage_i / temperature)    # GRPO advantage 做权重
+loss = -mean(advantage_i * log_prob_per_dim_i)
+# advantage 可以是负的：正 advantage → 增加该 noise 的概率，负 advantage → 远离该 noise
+# log_prob 用 mean（非 sum）避免高维梯度爆炸
+# 不使用 softmax（会把负 advantage 变成正的，丢失"远离坏点"的信号）
 ```
 
 ### 关键配置参数
 
 ```python
-config.policy.type = "gaussian"          # 策略类型（目前支持 gaussian，后续加 normalizing_flow）
+config.policy.type = "gaussian"          # 策略类型："gaussian" 或 "transformer"
 config.policy.hidden_dim = 512           # 网络隐藏层维度
-config.policy.learning_rate = 1e-4       # 学习率
-config.policy.temperature = 1.0          # advantage softmax 温度
+config.policy.learning_rate = 1e-3       # 学习率（log_prob 用 mean 后梯度较小，需要较大 lr）
+config.policy.temperature = 1.0          # advantage 缩放温度
 config.policy.kl_weight = 0.01           # KL(π||N(0,I)) 正则化，防止方差塌缩
 config.policy.train_every_n_epochs = 1   # 每 N epoch 训练一次
 ```

@@ -342,14 +342,11 @@ def compute_awr_loss(
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Advantage-Weighted Regression loss.
 
-    loss = -Σ w_i · log_prob_per_dim_i
-    w_i = softmax(advantage_i / temperature)
+    loss = -mean(advantage_i * log_prob_per_dim_i)
 
-    Advantages are already per-prompt normalized (GRPO-style), so we use them
-    directly as weights via softmax over the full batch. The per-prompt
-    normalization ensures advantages are comparable across prompts.
-
-    Log-prob is normalized by dimensionality to keep loss magnitude reasonable.
+    Advantages are raw GRPO values (can be negative): positive advantage
+    pulls policy toward that noise, negative pushes away.
+    Log-prob is averaged over dimensions (not summed) for stable gradients.
 
     Args:
         policy: the prior policy network (can be DDP-wrapped)
@@ -357,37 +354,31 @@ def compute_awr_loss(
         pooled_prompt_embeds: (B, pooled_dim)
         prompt_embeds: (B, seq_len, embed_dim)
         advantages: (B,) GRPO-style per-prompt normalized advantages
-        temperature: softmax temperature
+        temperature: scales advantages before weighting
 
     Returns:
         loss: scalar
         stats: dict of training statistics
     """
-    B = noises.shape[0]
-    num_dims = noises.shape[1] * noises.shape[2] * noises.shape[3]
-
-    # Compute weights from advantages
-    weights = torch.softmax(advantages / temperature, dim=0)  # (B,)
-
     # Compute log-prob via forward() (DDP-compatible)
     mu, log_sigma = policy(pooled_prompt_embeds, prompt_embeds)
     var = (2 * log_sigma).exp()
     log_probs = -0.5 * ((noises - mu) ** 2 / var + 2 * log_sigma + math.log(2 * math.pi))
-    log_probs = log_probs.sum(dim=(1, 2, 3))  # (B,)
+    log_probs = log_probs.mean(dim=(1, 2, 3))  # (B,) — per-dim average, not sum
 
-    # Weighted NLL (use raw log_probs for proper gradient magnitude)
-    loss = -(weights * log_probs).sum() / B
+    # Advantage-weighted loss: positive adv → increase log_prob, negative → decrease
+    weights = advantages / temperature  # raw advantages, can be negative
+    loss = -(weights * log_probs).mean()
 
     # Stats for logging
     with torch.no_grad():
-        effective_sample_size = 1.0 / (weights ** 2).sum()
         stats = {
             "policy_loss": loss.item(),
             "log_prob_mean": log_probs.mean().item(),
-            "log_prob_per_dim": (log_probs / num_dims).mean().item(),
+            "advantage_max": advantages.max().item(),
+            "advantage_min": advantages.min().item(),
             "weight_max": weights.max().item(),
             "weight_min": weights.min().item(),
-            "effective_sample_size": effective_sample_size.item(),
         }
 
     return loss, stats

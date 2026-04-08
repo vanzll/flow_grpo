@@ -99,6 +99,27 @@ def pickscore_sd3_prior_4gpu():
     return config
 
 
+def pickscore_sd3_particle_90buf_4gpu():
+    """4x A40: 90% from buffer, 10% from N(0,I). Heavy exploitation.
+
+    Tests whether aggressive buffer sampling improves train set reward.
+    """
+    config = pickscore_sd3_prior_1gpu()
+    config.prior.update_method = "particle"
+    config.prior.mix_ratio = 0.1              # 10% N(0,I), 90% buffer
+    config.prior.perturbation_std = 0.1
+    config.prior.temperature = 1.0
+    config.sample.train_batch_size = 8
+    config.sample.num_batches_per_epoch = 8
+    config.sample.test_batch_size = 16
+    config.num_epochs = 200
+    config.eval_freq = 10
+    config.save_freq = 20
+    config.prior.cache_dir = "cache/particle_90buf"
+    config.save_dir = "logs/prior_shaping/particle_90buf_4gpu"
+    return config
+
+
 def pickscore_sd3_particle_8gpu_h20():
     """8x H20 96GB config for particle prior shaping.
 

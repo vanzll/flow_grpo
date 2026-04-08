@@ -164,8 +164,8 @@ def broadcast_prior(prior, accelerator: Accelerator):
 # ---------------------------------------------------------------------------
 
 def run_eval(pipeline, prior, test_dataloader, text_encoders, tokenizers, config,
-             accelerator, epoch, reward_fn, executor, autocast):
-    """Evaluate shaped prior on test set. Logs images and rewards to W&B."""
+             accelerator, epoch, reward_fn, executor, autocast, prefix="eval"):
+    """Evaluate shaped prior. prefix controls W&B metric names."""
     neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings(
         [""], text_encoders, tokenizers, max_sequence_length=128, device=accelerator.device
     )
@@ -244,7 +244,7 @@ def run_eval(pipeline, prior, test_dataloader, text_encoders, tokenizers, config
             ]
             wandb.log(
                 {
-                    "eval_images": [
+                    f"{prefix}_images": [
                         wandb.Image(
                             os.path.join(tmpdir, f"{idx}.jpg"),
                             caption=f"{prompt:.1000} | " + " | ".join(
@@ -253,7 +253,7 @@ def run_eval(pipeline, prior, test_dataloader, text_encoders, tokenizers, config
                         )
                         for idx, (prompt, reward) in enumerate(zip(sampled_prompts, sampled_rewards))
                     ],
-                    **{f"eval_reward_{key}": np.mean(value[value != -10]) for key, value in all_rewards.items()},
+                    **{f"{prefix}_reward_{key}": np.mean(value[value != -10]) for key, value in all_rewards.items()},
                 },
                 step=epoch,
             )
@@ -385,8 +385,19 @@ def main(_):
         num_workers=8,
     )
 
+    # Train eval dataloader (first 2048 prompts of train set)
+    from torch.utils.data import Subset
+    train_eval_size = min(2048, len(train_dataset))
+    train_eval_subset = Subset(train_dataset, range(train_eval_size))
+    train_eval_dataloader = DataLoader(
+        train_eval_subset, batch_size=config.sample.test_batch_size,
+        collate_fn=TextPromptDataset.collate_fn, shuffle=False, num_workers=8,
+    )
+
     # Wrap dataloaders with accelerator (for distributed)
-    train_dataloader, test_dataloader = accelerator.prepare(train_dataloader, test_dataloader)
+    train_dataloader, test_dataloader, train_eval_dataloader = accelerator.prepare(
+        train_dataloader, test_dataloader, train_eval_dataloader
+    )
 
     # Negative prompt embeddings for CFG
     neg_prompt_embed, neg_pooled_prompt_embed = compute_text_embeddings(
@@ -421,6 +432,12 @@ def main(_):
             run_eval(
                 pipeline, prior, test_dataloader, text_encoders, tokenizers,
                 config, accelerator, epoch, eval_reward_fn, executor, autocast,
+                prefix="eval",
+            )
+            run_eval(
+                pipeline, prior, train_eval_dataloader, text_encoders, tokenizers,
+                config, accelerator, epoch, eval_reward_fn, executor, autocast,
+                prefix="train_eval",
             )
 
         # ---- Save prior (periodic) ----

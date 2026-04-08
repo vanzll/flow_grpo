@@ -21,7 +21,7 @@ def _add_policy_config(config):
     config.policy = policy = ml_collections.ConfigDict()
     policy.type = "gaussian"                 # "gaussian" or "normalizing_flow" (future)
     policy.hidden_dim = 512                  # hidden dim in policy network
-    policy.learning_rate = 1e-4              # policy optimizer LR
+    policy.learning_rate = 1e-3              # policy optimizer LR (log_prob uses mean not sum)
     policy.weight_decay = 1e-4
     policy.temperature = 1.0                 # softmax temperature for advantage weighting
     policy.train_every_n_epochs = 1          # train policy every N epochs
