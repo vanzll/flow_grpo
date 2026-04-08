@@ -79,6 +79,12 @@ class PriorDiT(nn.Module):
         self.norm_out = AdaLayerNormContinuous(inner_dim, inner_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out = nn.Linear(inner_dim, patch_size * patch_size * out_channels)
 
+        # Small-initialize output projection so initial velocity ≈ 0 (ODE ≈ identity)
+        # This ensures z ≈ ε at initialization, keeping z near the N(0,I) sphere
+        # Using small normal (not zero) to allow gradient flow through proj_out
+        nn.init.normal_(self.proj_out.weight, std=1e-4)
+        nn.init.zeros_(self.proj_out.bias)
+
     def _unpatchify(self, x: torch.Tensor) -> torch.Tensor:
         """(B, num_patches, patch_size²*C) → (B, C, H, W)"""
         p = self.patch_size
