@@ -19,8 +19,8 @@ def get_config(name):
 def _add_prior_dit_config(config):
     """Add prior-DiT-specific fields."""
     config.prior_dit = dit = ml_collections.ConfigDict()
-    dit.num_layers = 6
-    dit.num_attention_heads = 12
+    dit.num_layers = 8
+    dit.num_attention_heads = 16
     dit.attention_head_dim = 64
     dit.patch_size = 2
     dit.num_steps = 10                  # ODE steps for small DiT sampling
