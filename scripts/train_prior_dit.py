@@ -474,47 +474,62 @@ def main(_):
                 torch.as_tensor(rewards["avg"], device=accelerator.device).float()
             )
 
-        # ---- Gather across GPUs ----
-        all_epsilons = accelerator.gather(torch.cat(epoch_epsilons).to(accelerator.device)).cpu()
-        all_noises = accelerator.gather(torch.cat(epoch_noises).to(accelerator.device)).cpu()
-        all_rewards = accelerator.gather(torch.cat(epoch_rewards)).cpu().numpy()
-        all_prompt_embeds = accelerator.gather(torch.cat(epoch_prompt_embeds).to(accelerator.device)).cpu()
-        all_pooled_embeds = accelerator.gather(torch.cat(epoch_pooled_embeds).to(accelerator.device)).cpu()
+        # ---- Gather ONLY rewards for advantage computation (like Flow-GRPO) ----
+        # Training data stays local on each GPU — no redundant computation
+        local_epsilons = torch.cat(epoch_epsilons)      # this GPU's data only
+        local_noises = torch.cat(epoch_noises)
+        local_rewards = torch.cat(epoch_rewards)
+        local_prompt_embeds = torch.cat(epoch_prompt_embeds)
+        local_pooled_embeds = torch.cat(epoch_pooled_embeds)
 
-        # Gather prompts
+        # Gather rewards across GPUs for advantage normalization
+        gathered_rewards = accelerator.gather(local_rewards).cpu().numpy()
+
+        # Gather prompts for per-prompt stat tracking
         prompt_ids = tokenizers[0](
             epoch_prompts, padding="max_length", max_length=256, truncation=True, return_tensors="pt",
         ).input_ids.to(accelerator.device)
         all_prompt_ids = accelerator.gather(prompt_ids).cpu().numpy()
         all_prompts = pipeline.tokenizer.batch_decode(all_prompt_ids, skip_special_tokens=True)
 
-        # ---- Compute advantages (GRPO-style) ----
+        # ---- Compute advantages on gathered rewards (GRPO-style) ----
         if stat_tracker is not None:
-            advantages = stat_tracker.update(all_prompts, all_rewards)
+            advantages = stat_tracker.update(all_prompts, gathered_rewards)
             stat_tracker.clear()
         else:
-            advantages = (all_rewards - all_rewards.mean()) / (all_rewards.std() + 1e-4)
-        advantages = torch.tensor(advantages, dtype=torch.float32)
+            advantages = (gathered_rewards - gathered_rewards.mean()) / (gathered_rewards.std() + 1e-4)
 
-        # ---- Cache to disk ----
+        # Un-gather: each GPU keeps only its own shard of advantages
+        advantages = torch.as_tensor(advantages, dtype=torch.float32)
+        local_advantages = (
+            advantages.reshape(accelerator.num_processes, -1)[accelerator.process_index]
+            .to(accelerator.device)
+        )
+
+        # ---- Cache to disk (rank 0 gathers everything for saving) ----
         if accelerator.is_main_process:
+            all_epsilons = accelerator.gather(local_epsilons.to(accelerator.device)).cpu()
+            all_noises = accelerator.gather(local_noises.to(accelerator.device)).cpu()
             cache_path = os.path.join(cache_dir, f"epoch_{epoch:06d}.npz")
             np.savez_compressed(
                 cache_path,
                 epsilons=all_epsilons.to(torch.float16).numpy(),
                 noises=all_noises.to(torch.float16).numpy(),
-                rewards=all_rewards.astype(np.float32),
+                rewards=gathered_rewards.astype(np.float32),
                 advantages=advantages.numpy().astype(np.float32),
                 prompt_ids=all_prompt_ids.astype(np.int32),
             )
+        # Sync so non-rank-0 don't race ahead while rank-0 saves
+        if accelerator.num_processes > 1:
+            torch.distributed.barrier()
 
-        # ---- Train prior DiT (mini-batch to avoid OOM) ----
+        # ---- Train prior DiT on LOCAL shard (proper DDP) ----
         if epoch % dit_config.train_every_n_epochs == 0:
             prior_dit.train()
             optimizer.zero_grad()
 
-            N = len(all_epsilons)
-            mini_bs = min(16, N)  # process 16 samples at a time
+            N = len(local_epsilons)  # per-GPU sample count
+            mini_bs = min(16, N)
             num_mini = (N + mini_bs - 1) // mini_bs
             total_loss = 0.0
             last_stats = {}
@@ -522,11 +537,11 @@ def main(_):
             for mi in range(num_mini):
                 s = mi * mini_bs
                 e = min(s + mini_bs, N)
-                mb_eps = all_epsilons[s:e].to(accelerator.device)
-                mb_z = all_noises[s:e].to(accelerator.device)
-                mb_pe = all_prompt_embeds[s:e].to(accelerator.device)
-                mb_ppe = all_pooled_embeds[s:e].to(accelerator.device)
-                mb_adv = advantages[s:e].to(accelerator.device)
+                mb_eps = local_epsilons[s:e].to(accelerator.device)
+                mb_z = local_noises[s:e].to(accelerator.device)
+                mb_pe = local_prompt_embeds[s:e].to(accelerator.device)
+                mb_ppe = local_pooled_embeds[s:e].to(accelerator.device)
+                mb_adv = local_advantages[s:e]
 
                 mb_size = e - s
                 mb_null_pe = neg_prompt_embed.expand(mb_size, -1, -1)
@@ -541,7 +556,6 @@ def main(_):
                     null_prompt_embeds=mb_null_pe,
                     null_pooled_prompt_embeds=mb_null_ppe,
                 )
-                # Scale loss for gradient accumulation
                 loss = loss / num_mini
                 accelerator.backward(loss)
                 total_loss += loss.item()
@@ -559,15 +573,15 @@ def main(_):
             # ---- Log ----
             if accelerator.is_main_process:
                 with torch.no_grad():
-                    z_norm = all_noises[:8].flatten(1).norm(dim=1).mean()
+                    z_norm = local_noises[:8].flatten(1).norm(dim=1).mean()
 
                 log_dict = {
                     "epoch": epoch,
                     "global_step": global_step,
-                    "reward_mean": float(all_rewards.mean()),
-                    "reward_std": float(all_rewards.std()),
-                    "reward_max": float(all_rewards.max()),
-                    "reward_min": float(all_rewards.min()),
+                    "reward_mean": float(gathered_rewards.mean()),
+                    "reward_std": float(gathered_rewards.std()),
+                    "reward_max": float(gathered_rewards.max()),
+                    "reward_min": float(gathered_rewards.min()),
                     "advantage_mean": float(advantages.mean()),
                     "advantage_std": float(advantages.std()),
                     "dit_loss": dit_stats["dit_loss"],
@@ -582,7 +596,7 @@ def main(_):
                 wandb.log(log_dict, step=epoch)
 
                 logger.info(
-                    f"Epoch {epoch}: reward={all_rewards.mean():.4f} ± {all_rewards.std():.4f}, "
+                    f"Epoch {epoch}: reward={gathered_rewards.mean():.4f} ± {gathered_rewards.std():.4f}, "
                     f"dit_loss={dit_stats['dit_loss']:.4f}, mse={dit_stats['dit_mse_mean']:.4f}, "
                     f"z_norm={float(z_norm):.1f}"
                 )

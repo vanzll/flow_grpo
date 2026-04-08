@@ -481,47 +481,56 @@ def main(_):
                 torch.as_tensor(rewards["avg"], device=accelerator.device).float()
             )
 
-        # ---- Gather across GPUs ----
-        all_noises = accelerator.gather(torch.cat(epoch_noises).to(accelerator.device)).cpu()
-        all_rewards = accelerator.gather(torch.cat(epoch_rewards)).cpu().numpy()
-        all_prompt_embeds = accelerator.gather(torch.cat(epoch_prompt_embeds).to(accelerator.device)).cpu()
-        all_pooled_embeds = accelerator.gather(torch.cat(epoch_pooled_embeds).to(accelerator.device)).cpu()
+        # ---- Gather ONLY rewards for advantage computation (like Flow-GRPO) ----
+        local_noises = torch.cat(epoch_noises)
+        local_rewards = torch.cat(epoch_rewards)
+        local_prompt_embeds = torch.cat(epoch_prompt_embeds)
+        local_pooled_embeds = torch.cat(epoch_pooled_embeds)
 
-        # Gather prompts via tokenization roundtrip
+        gathered_rewards = accelerator.gather(local_rewards).cpu().numpy()
+
         prompt_ids = tokenizers[0](
             epoch_prompts, padding="max_length", max_length=256, truncation=True, return_tensors="pt",
         ).input_ids.to(accelerator.device)
         all_prompt_ids = accelerator.gather(prompt_ids).cpu().numpy()
         all_prompts = pipeline.tokenizer.batch_decode(all_prompt_ids, skip_special_tokens=True)
 
-        # ---- Compute advantages (GRPO-style) ----
+        # ---- Compute advantages on gathered rewards (GRPO-style) ----
         if stat_tracker is not None:
-            advantages = stat_tracker.update(all_prompts, all_rewards)
+            advantages = stat_tracker.update(all_prompts, gathered_rewards)
             stat_tracker.clear()
         else:
-            advantages = (all_rewards - all_rewards.mean()) / (all_rewards.std() + 1e-4)
-        advantages = torch.tensor(advantages, dtype=torch.float32)
+            advantages = (gathered_rewards - gathered_rewards.mean()) / (gathered_rewards.std() + 1e-4)
 
-        # ---- Cache to disk ----
+        # Un-gather: each GPU keeps only its own shard
+        advantages = torch.as_tensor(advantages, dtype=torch.float32)
+        local_advantages = (
+            advantages.reshape(accelerator.num_processes, -1)[accelerator.process_index]
+            .to(accelerator.device)
+        )
+
+        # ---- Cache to disk (rank 0 only) ----
         if accelerator.is_main_process:
+            all_noises_gathered = accelerator.gather(local_noises.to(accelerator.device)).cpu()
             cache_path = os.path.join(cache_dir, f"epoch_{epoch:06d}.npz")
             np.savez_compressed(
                 cache_path,
-                noises=all_noises.to(torch.float16).numpy(),
-                rewards=all_rewards.astype(np.float32),
+                noises=all_noises_gathered.to(torch.float16).numpy(),
+                rewards=gathered_rewards.astype(np.float32),
                 advantages=advantages.numpy().astype(np.float32),
                 prompt_ids=all_prompt_ids.astype(np.int32),
             )
+        if accelerator.num_processes > 1:
+            torch.distributed.barrier()
 
-        # ---- Train policy (advantage-weighted regression) ----
+        # ---- Train policy on LOCAL shard (proper DDP) ----
         if epoch % config.policy.train_every_n_epochs == 0:
             policy.train()
 
-            # Move data to device
-            train_noises = all_noises.to(accelerator.device)
-            train_pe = all_prompt_embeds.to(accelerator.device)
-            train_ppe = all_pooled_embeds.to(accelerator.device)
-            train_advantages = advantages.to(accelerator.device)
+            train_noises = local_noises.to(accelerator.device)
+            train_pe = local_prompt_embeds.to(accelerator.device)
+            train_ppe = local_pooled_embeds.to(accelerator.device)
+            train_advantages = local_advantages
 
             # Forward + loss (use DDP-wrapped policy for gradient sync)
             loss, awr_stats, mu_awr, log_sigma_awr = compute_awr_loss(
@@ -574,10 +583,10 @@ def main(_):
                     "epoch": epoch,
                     "global_step": global_step,
                     # Reward
-                    "reward_mean": float(all_rewards.mean()),
-                    "reward_std": float(all_rewards.std()),
-                    "reward_max": float(all_rewards.max()),
-                    "reward_min": float(all_rewards.min()),
+                    "reward_mean": float(gathered_rewards.mean()),
+                    "reward_std": float(gathered_rewards.std()),
+                    "reward_max": float(gathered_rewards.max()),
+                    "reward_min": float(gathered_rewards.min()),
                     # Advantage
                     "advantage_mean": float(advantages.mean()),
                     "advantage_std": float(advantages.std()),
@@ -600,7 +609,7 @@ def main(_):
                 wandb.log(log_dict, step=epoch)
 
                 logger.info(
-                    f"Epoch {epoch}: reward={all_rewards.mean():.4f} ± {all_rewards.std():.4f}, "
+                    f"Epoch {epoch}: reward={gathered_rewards.mean():.4f} ± {gathered_rewards.std():.4f}, "
                     f"loss={awr_stats['policy_loss']:.4f}, "
                     f"KL={float(kl_sum):.2f}, σ={float(sigma.mean()):.4f}"
                 )
