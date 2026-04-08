@@ -244,8 +244,8 @@ def compute_dit_awr_loss(
             prompt_embeds = prompt_embeds.clone()
             pooled_prompt_embeds = pooled_prompt_embeds.clone()
             if null_prompt_embeds is not None and null_pooled_prompt_embeds is not None:
-                prompt_embeds[drop_mask] = null_prompt_embeds[drop_mask]
-                pooled_prompt_embeds[drop_mask] = null_pooled_prompt_embeds[drop_mask]
+                prompt_embeds[drop_mask] = null_prompt_embeds[drop_mask].to(prompt_embeds.dtype)
+                pooled_prompt_embeds[drop_mask] = null_pooled_prompt_embeds[drop_mask].to(pooled_prompt_embeds.dtype)
             else:
                 prompt_embeds[drop_mask] = 0.0
                 pooled_prompt_embeds[drop_mask] = 0.0
