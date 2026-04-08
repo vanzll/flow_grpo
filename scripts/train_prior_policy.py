@@ -19,6 +19,7 @@ Usage:
 
 from collections import defaultdict
 import contextlib
+import math
 import os
 import datetime
 from concurrent import futures
@@ -556,8 +557,19 @@ def main(_):
                 with torch.no_grad():
                     unwrapped = accelerator.unwrap_model(policy)
                     mu, log_sigma = unwrapped(train_ppe[:8], train_pe[:8])
-                    policy_kl = unwrapped.kl_from_standard_normal(train_ppe[:8], train_pe[:8])
-                    policy_entropy = unwrapped.entropy(train_ppe[:8], train_pe[:8])
+                    sigma = log_sigma.exp()
+                    # KL and entropy in both sum and mean forms
+                    kl_per_sample = 0.5 * (sigma**2 + mu**2 - 1 - 2*log_sigma)
+                    kl_sum = kl_per_sample.sum(dim=(1,2,3)).mean()
+                    kl_mean = kl_per_sample.mean()
+                    d = mu.shape[1] * mu.shape[2] * mu.shape[3]
+                    entropy_sum = (0.5 * d * (1 + math.log(2 * math.pi)) + log_sigma.sum(dim=(1,2,3))).mean()
+                    entropy_mean = (0.5 * (1 + math.log(2 * math.pi)) + log_sigma.mean(dim=(1,2,3))).mean()
+                    # log_prob in both forms
+                    z_sample = train_noises[:8]
+                    lp = -0.5 * ((z_sample - mu)**2 / sigma**2 + 2*log_sigma + math.log(2 * math.pi))
+                    log_prob_sum = lp.sum(dim=(1,2,3)).mean()
+                    log_prob_mean = lp.mean()
 
                 log_dict = {
                     "epoch": epoch,
@@ -572,12 +584,18 @@ def main(_):
                     "advantage_std": float(advantages.std()),
                     # Policy
                     "policy_loss": awr_stats["policy_loss"],
-                    "policy_log_prob_mean": awr_stats["log_prob_mean"],
                     "policy_mu_norm": float(mu.flatten(1).norm(dim=1).mean()),
-                    "policy_sigma_mean": float(log_sigma.exp().mean()),
-                    "policy_kl_from_n01": float(policy_kl),
-                    "policy_entropy": float(policy_entropy),
-                    "effective_sample_size": awr_stats["effective_sample_size"],
+                    "policy_sigma_mean": float(sigma.mean()),
+                    # Log-prob (sum vs mean over dims)
+                    "log_prob_sum": float(log_prob_sum),
+                    "log_prob_mean": float(log_prob_mean),
+                    # KL (sum vs mean over dims)
+                    "kl_sum": float(kl_sum),
+                    "kl_mean": float(kl_mean),
+                    # Entropy (sum vs mean over dims)
+                    "entropy_sum": float(entropy_sum),
+                    "entropy_mean": float(entropy_mean),
+                    # Training
                     "grad_norm": float(grad_norm),
                 }
                 wandb.log(log_dict, step=epoch)
