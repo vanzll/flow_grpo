@@ -400,6 +400,7 @@ class ParticlePrior:
             os.makedirs(dirname, exist_ok=True)
         torch.save({
             "noises": self.noises,
+            "rewards": self.rewards,
             "weights": self.weights,
             "shape": self.shape,
             "perturbation_std": self.perturbation_std,
@@ -410,5 +411,6 @@ class ParticlePrior:
     def load(self, path: str):
         state = torch.load(path, map_location="cpu")
         self.noises = state["noises"]
+        self.rewards = state.get("rewards", None)
         self.weights = state["weights"]
         self.shape = tuple(state["shape"])

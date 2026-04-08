@@ -189,6 +189,9 @@ def compute_dit_awr_loss(
     advantages: torch.Tensor,
     temperature: float = 1.0,
     cfg_drop_rate: float = 0.0,
+    adv_clip_max: float = 5.0,
+    null_prompt_embeds: Optional[torch.Tensor] = None,
+    null_pooled_prompt_embeds: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Advantage-weighted flow matching MSE loss (DiffusionNFT-inspired).
 
@@ -206,6 +209,10 @@ def compute_dit_awr_loss(
         advantages: (B,) raw GRPO advantages (can be negative)
         temperature: advantage scaling
         cfg_drop_rate: probability of dropping prompt for CFG training
+        adv_clip_max: clamp advantages to [-adv_clip_max, adv_clip_max] for stability
+        null_prompt_embeds: (B, seq_len, dim) embeddings of "" for CFG dropout
+            (if None, zeros are used — less effective but backward compatible)
+        null_pooled_prompt_embeds: (B, pooled_dim) pooled embeddings of ""
 
     Returns:
         loss: scalar
@@ -223,14 +230,18 @@ def compute_dit_awr_loss(
     # Target velocity: dz_sigma/dsigma = d/dsigma[sigma*eps + (1-sigma)*z] = eps - z
     v_target = epsilon - z
 
-    # CFG training: randomly drop prompt
+    # CFG training: randomly drop prompt (replace with null prompt embeddings)
     if cfg_drop_rate > 0 and model.training:
         drop_mask = torch.rand(B, device=z.device) < cfg_drop_rate
         if drop_mask.any():
             prompt_embeds = prompt_embeds.clone()
             pooled_prompt_embeds = pooled_prompt_embeds.clone()
-            prompt_embeds[drop_mask] = 0.0
-            pooled_prompt_embeds[drop_mask] = 0.0
+            if null_prompt_embeds is not None and null_pooled_prompt_embeds is not None:
+                prompt_embeds[drop_mask] = null_prompt_embeds[drop_mask]
+                pooled_prompt_embeds[drop_mask] = null_pooled_prompt_embeds[drop_mask]
+            else:
+                prompt_embeds[drop_mask] = 0.0
+                pooled_prompt_embeds[drop_mask] = 0.0
 
     # Convert t to timestep format (1000 * (1-t): t=0→1000 noisy, t=1→0 clean)
     timestep = (1 - t) * 1000
@@ -240,6 +251,9 @@ def compute_dit_awr_loss(
 
     # Per-sample MSE (averaged over spatial dims)
     mse = ((v_pred - v_target) ** 2).mean(dim=(1, 2, 3))  # (B,)
+
+    # Clamp advantages to prevent extreme negative weights destabilizing training
+    advantages = advantages.clamp(min=-adv_clip_max, max=adv_clip_max)
 
     # Advantage-weighted loss
     weights = advantages / temperature

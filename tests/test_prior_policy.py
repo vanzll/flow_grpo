@@ -177,10 +177,10 @@ class TestAWRLoss:
         seq = torch.randn(B, 10, 256)
         advantages = torch.randn(B)
 
-        loss, stats = compute_awr_loss(policy, noises, pooled, seq, advantages)
+        loss, stats, _, _ = compute_awr_loss(policy, noises, pooled, seq, advantages)
         assert loss.shape == ()
         assert "policy_loss" in stats
-        assert "effective_sample_size" in stats
+        assert "log_prob_mean" in stats
 
     def test_loss_backprop(self):
         policy = GaussianPolicy(
@@ -193,7 +193,7 @@ class TestAWRLoss:
         seq = torch.randn(B, 10, 256)
         advantages = torch.randn(B)
 
-        loss, _ = compute_awr_loss(policy, noises, pooled, seq, advantages)
+        loss, _, _, _ = compute_awr_loss(policy, noises, pooled, seq, advantages)
         loss.backward()
         has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.parameters())
         assert has_grad
@@ -213,10 +213,9 @@ class TestAWRLoss:
         advantages = torch.zeros(B)
         advantages[0] = 100.0
 
-        loss, stats = compute_awr_loss(policy, noises, pooled, seq, advantages, temperature=1.0)
+        loss, stats, _, _ = compute_awr_loss(policy, noises, pooled, seq, advantages, temperature=1.0)
         # Weight should be concentrated on sample 0
         assert stats["weight_max"] > 0.99
-        assert stats["effective_sample_size"] < 2.0
 
     def test_uniform_advantages_give_equal_weights(self):
         policy = GaussianPolicy(
@@ -229,5 +228,7 @@ class TestAWRLoss:
         seq = torch.randn(B, 10, 256)
         advantages = torch.zeros(B)  # all equal
 
-        _, stats = compute_awr_loss(policy, noises, pooled, seq, advantages)
-        assert stats["effective_sample_size"] == pytest.approx(B, abs=0.1)
+        _, stats, _, _ = compute_awr_loss(policy, noises, pooled, seq, advantages)
+        # With uniform advantages (all zero), weights should be equal
+        assert stats["weight_max"] == pytest.approx(0.0, abs=1e-6)
+        assert stats["weight_min"] == pytest.approx(0.0, abs=1e-6)

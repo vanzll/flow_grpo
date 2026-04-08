@@ -104,6 +104,7 @@ class GaussianPolicy(nn.Module):
 
         mu = self.mu_head(x)  # (B, C, 64, 64)
         log_sigma = self.log_sigma_head(x)  # (B, C, 64, 64)
+        log_sigma = log_sigma.clamp(min=-10, max=10)  # prevent underflow/overflow in exp()
         return mu, log_sigma
 
     def sample(self, pooled_prompt_embeds: torch.Tensor, prompt_embeds: torch.Tensor):
@@ -282,6 +283,7 @@ class TransformerPolicy(nn.Module):
 
         mu = self.mu_head(x)
         log_sigma = self.log_sigma_head(x)
+        log_sigma = log_sigma.clamp(min=-10, max=10)  # prevent underflow/overflow in exp()
         return mu, log_sigma
 
     def sample(self, pooled_prompt_embeds: torch.Tensor, prompt_embeds: torch.Tensor):
@@ -359,6 +361,8 @@ def compute_awr_loss(
     Returns:
         loss: scalar
         stats: dict of training statistics
+        mu: (B, C, H, W) predicted mean (for reuse in KL computation)
+        log_sigma: (B, C, H, W) predicted log-std (for reuse in KL computation)
     """
     # Compute log-prob via forward() (DDP-compatible)
     mu, log_sigma = policy(pooled_prompt_embeds, prompt_embeds)
@@ -381,4 +385,4 @@ def compute_awr_loss(
             "weight_min": weights.min().item(),
         }
 
-    return loss, stats
+    return loss, stats, mu, log_sigma

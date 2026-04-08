@@ -524,7 +524,7 @@ def main(_):
             train_advantages = advantages.to(accelerator.device)
 
             # Forward + loss (use DDP-wrapped policy for gradient sync)
-            loss, awr_stats = compute_awr_loss(
+            loss, awr_stats, mu_awr, log_sigma_awr = compute_awr_loss(
                 policy,
                 train_noises,
                 train_ppe,
@@ -533,11 +533,10 @@ def main(_):
                 temperature=config.policy.temperature,
             )
 
-            # Optional KL regularization
+            # Optional KL regularization (reuse mu/log_sigma from AWR forward pass)
             if config.policy.kl_weight > 0:
-                mu_kl, log_sigma_kl = policy(train_ppe, train_pe)
-                sigma2_kl = (2 * log_sigma_kl).exp()
-                kl = 0.5 * (sigma2_kl + mu_kl ** 2 - 1 - 2 * log_sigma_kl).sum(dim=(1,2,3)).mean()
+                sigma2_kl = (2 * log_sigma_awr).exp()
+                kl = 0.5 * (sigma2_kl + mu_awr ** 2 - 1 - 2 * log_sigma_awr).sum(dim=(1,2,3)).mean()
                 loss = loss + config.policy.kl_weight * kl
 
             # Backward

@@ -19,7 +19,7 @@ def get_config(name):
 def _add_policy_config(config):
     """Add prior-policy-specific fields."""
     config.policy = policy = ml_collections.ConfigDict()
-    policy.type = "gaussian"                 # "gaussian" or "normalizing_flow" (future)
+    policy.type = "gaussian"                 # "gaussian" or "transformer"
     policy.hidden_dim = 512                  # hidden dim in policy network
     policy.learning_rate = 1e-3              # policy optimizer LR (log_prob uses mean not sum)
     policy.weight_decay = 1e-4
