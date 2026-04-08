@@ -404,9 +404,9 @@ def main(_):
             torch.save(accelerator.unwrap_model(prior_dit).state_dict(), save_path)
 
         # ---- Sampling phase ----
-        prior_dit.eval()
-        epoch_epsilons = []  # starting noise
-        epoch_noises = []    # output noise (z)
+        # z sampled directly from N(0,I), NOT through small DiT
+        # ε for flow matching training is sampled independently during training
+        epoch_noises = []    # z ~ N(0,I), the big DiT's prior
         epoch_rewards = []
         epoch_prompt_embeds = []
         epoch_pooled_embeds = []
@@ -426,16 +426,12 @@ def main(_):
                 max_sequence_length=128, device=accelerator.device,
             )
 
-            # Sample from prior DiT (multi-step ODE)
-            with torch.no_grad():
-                z, epsilon = accelerator.unwrap_model(prior_dit).sample(
-                    prompt_embeds, pooled_prompt_embeds,
-                    num_steps=dit_config.num_steps,
-                    cfg_scale=dit_config.cfg_scale,
-                    neg_prompt_embeds=sample_neg_prompt_embeds[:len(prompts)],
-                    neg_pooled_prompt_embeds=sample_neg_pooled_prompt_embeds[:len(prompts)],
-                )
-                z = z.to(dtype=inference_dtype)
+            # Sample z directly from N(0,I) — this is the big DiT's prior
+            # NOT through small DiT (small DiT is only used at inference time)
+            z = torch.randn(
+                len(prompts), latent_channels, latent_h, latent_w,
+                device=accelerator.device, dtype=inference_dtype,
+            )
 
             # Generate via frozen big DiT
             with autocast():
@@ -458,7 +454,6 @@ def main(_):
             time.sleep(0)
             reward_futures.append(reward_future)
 
-            epoch_epsilons.append(epsilon.float().cpu())
             epoch_noises.append(z.float().cpu())
             epoch_prompt_embeds.append(prompt_embeds.float().cpu())
             epoch_pooled_embeds.append(pooled_prompt_embeds.float().cpu())
@@ -475,17 +470,13 @@ def main(_):
             )
 
         # ---- Gather ONLY rewards for advantage computation (like Flow-GRPO) ----
-        # Training data stays local on each GPU — no redundant computation
-        local_epsilons = torch.cat(epoch_epsilons)      # this GPU's data only
-        local_noises = torch.cat(epoch_noises)
+        local_noises = torch.cat(epoch_noises)      # z ~ N(0,I), this GPU's data only
         local_rewards = torch.cat(epoch_rewards)
         local_prompt_embeds = torch.cat(epoch_prompt_embeds)
         local_pooled_embeds = torch.cat(epoch_pooled_embeds)
 
-        # Gather rewards across GPUs for advantage normalization
         gathered_rewards = accelerator.gather(local_rewards).cpu().numpy()
 
-        # Gather prompts for per-prompt stat tracking
         prompt_ids = tokenizers[0](
             epoch_prompts, padding="max_length", max_length=256, truncation=True, return_tensors="pt",
         ).input_ids.to(accelerator.device)
@@ -499,21 +490,18 @@ def main(_):
         else:
             advantages = (gathered_rewards - gathered_rewards.mean()) / (gathered_rewards.std() + 1e-4)
 
-        # Un-gather: each GPU keeps only its own shard of advantages
         advantages = torch.as_tensor(advantages, dtype=torch.float32)
         local_advantages = (
             advantages.reshape(accelerator.num_processes, -1)[accelerator.process_index]
             .to(accelerator.device)
         )
 
-        # ---- Cache to disk (all ranks must participate in gather) ----
-        all_epsilons = accelerator.gather(local_epsilons.to(accelerator.device)).cpu()
+        # ---- Cache to disk (all ranks participate in gather for noises) ----
         all_noises = accelerator.gather(local_noises.to(accelerator.device)).cpu()
         if accelerator.is_main_process:
             cache_path = os.path.join(cache_dir, f"epoch_{epoch:06d}.npz")
             np.savez_compressed(
                 cache_path,
-                epsilons=all_epsilons.to(torch.float16).numpy(),
                 noises=all_noises.to(torch.float16).numpy(),
                 rewards=gathered_rewards.astype(np.float32),
                 advantages=advantages.numpy().astype(np.float32),
@@ -525,7 +513,7 @@ def main(_):
             prior_dit.train()
             optimizer.zero_grad()
 
-            N = len(local_epsilons)  # per-GPU sample count
+            N = len(local_noises)  # per-GPU sample count
             mini_bs = min(16, N)
             num_mini = (N + mini_bs - 1) // mini_bs
             total_loss = 0.0
@@ -534,8 +522,9 @@ def main(_):
             for mi in range(num_mini):
                 s = mi * mini_bs
                 e = min(s + mini_bs, N)
-                mb_eps = local_epsilons[s:e].to(accelerator.device)
                 mb_z = local_noises[s:e].to(accelerator.device)
+                # ε sampled INDEPENDENTLY for flow matching (not paired with z)
+                mb_eps = torch.randn_like(mb_z)
                 mb_pe = local_prompt_embeds[s:e].to(accelerator.device)
                 mb_ppe = local_pooled_embeds[s:e].to(accelerator.device)
                 mb_adv = local_advantages[s:e]
