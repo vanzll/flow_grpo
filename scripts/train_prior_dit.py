@@ -528,11 +528,18 @@ def main(_):
                 mb_ppe = all_pooled_embeds[s:e].to(accelerator.device)
                 mb_adv = advantages[s:e].to(accelerator.device)
 
+                mb_size = e - s
+                mb_null_pe = neg_prompt_embed.expand(mb_size, -1, -1)
+                mb_null_ppe = neg_pooled_prompt_embed.expand(mb_size, -1)
+
                 loss, last_stats = compute_dit_awr_loss(
                     prior_dit, mb_eps, mb_z, mb_pe, mb_ppe, mb_adv,
                     temperature=dit_config.temperature,
                     cfg_drop_rate=dit_config.cfg_drop_rate,
                     v_reg_weight=dit_config.v_reg_weight,
+                    adv_clip_max=config.train.adv_clip_max,
+                    null_prompt_embeds=mb_null_pe,
+                    null_pooled_prompt_embeds=mb_null_ppe,
                 )
                 # Scale loss for gradient accumulation
                 loss = loss / num_mini
@@ -564,6 +571,8 @@ def main(_):
                     "advantage_mean": float(advantages.mean()),
                     "advantage_std": float(advantages.std()),
                     "dit_loss": dit_stats["dit_loss"],
+                    "dit_awr_loss": dit_stats["dit_awr_loss"],
+                    "dit_v_reg": dit_stats["dit_v_reg"],
                     "dit_mse_mean": dit_stats["dit_mse_mean"],
                     "z_norm": float(z_norm),
                     "v_pred_norm": dit_stats["v_pred_norm"],
