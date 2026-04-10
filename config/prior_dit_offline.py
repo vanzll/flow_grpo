@@ -40,8 +40,8 @@ def _add_offline_config(config):
     offline.cache_dir = "cache/prior_dit_8gpu"
     offline.max_cache_files = 0
     offline.num_val_files = 16
-    offline.train_batch_size = 192
-    offline.val_batch_size = 192
+    offline.train_batch_size = 128
+    offline.val_batch_size = 128
     offline.num_workers = 0
     offline.max_val_batches = 32
     offline.score_source = "advantages"
@@ -82,8 +82,8 @@ def pickscore_sd3_dit_offline_1gpu():
 def pickscore_sd3_dit_offline_8gpu_h20():
     config = pickscore_sd3_dit_offline_1gpu()
     config.sample.test_batch_size = 32
-    config.offline.train_batch_size = 192
-    config.offline.val_batch_size = 192
+    config.offline.train_batch_size = 128
+    config.offline.val_batch_size = 128
     config.offline.num_val_files = 16
     config.save_dir = "logs/prior_dit_offline/pickscore_8gpu_h20"
     return config
