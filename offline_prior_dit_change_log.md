@@ -11,8 +11,8 @@ Scope:
 Requested changes applied:
 
 1. Batch size increased
-- `offline.train_batch_size`: `16 -> 64`
-- `offline.val_batch_size`: `16 -> 64`
+- `offline.train_batch_size`: `16 -> 128`
+- `offline.val_batch_size`: `16 -> 128`
 
 2. Weight transform removed exponential
 - `offline.weight_transform`: `"exp" -> "identity"`
