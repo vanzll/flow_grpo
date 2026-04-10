@@ -41,9 +41,13 @@ Result:
   - `prior_dit.small_init_output = False`
   - `prior_dit.output_init_std = 1e-4`
 
+6. Increase offline Prior DiT ODE sampling steps
+- `prior_dit.num_steps`: `10 -> 45`
+
 Result:
 - Offline Prior DiT no longer forces the final projection head to start near zero.
 - This removes the explicit bias toward the zero-velocity-field initialization for the offline experiment.
+- Offline evaluation / generation now uses 45 ODE steps for the small Prior DiT sampler.
 
 Operational note:
 - `epoch 0` evaluation is still skipped.

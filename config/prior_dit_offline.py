@@ -20,7 +20,7 @@ def _add_prior_dit_config(config):
     dit.num_attention_heads = 16
     dit.attention_head_dim = 64
     dit.patch_size = 2
-    dit.num_steps = 10
+    dit.num_steps = 45
     dit.learning_rate = 1e-4
     dit.weight_decay = 1e-4
     dit.cfg_drop_rate = 0.1
