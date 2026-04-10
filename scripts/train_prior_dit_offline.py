@@ -202,6 +202,8 @@ def build_supervised_weights(rewards, advantages, config):
         weights = torch.sigmoid(scores / temperature)
     elif offline.weight_transform == "identity":
         weights = scores
+    elif offline.weight_transform == "binary_positive":
+        weights = (scores > 0).to(scores.dtype)
     elif offline.weight_transform == "uniform":
         weights = torch.ones_like(scores)
     else:
@@ -223,6 +225,7 @@ def compute_dit_supervised_loss(
     prompt_embeds,
     pooled_prompt_embeds,
     sample_weights,
+    normalize_by_weight_sum=False,
     cfg_drop_rate=0.0,
     v_reg_weight=0.01,
     null_prompt_embeds=None,
@@ -254,7 +257,10 @@ def compute_dit_supervised_loss(
 
     mse = ((v_pred - v_target) ** 2).mean(dim=(1, 2, 3))
     weights = sample_weights.float()
-    supervised_loss = (weights * mse).mean()
+    if normalize_by_weight_sum:
+        supervised_loss = (weights * mse).sum() / weights.sum().clamp_min(1.0)
+    else:
+        supervised_loss = (weights * mse).mean()
     v_reg = (v_pred ** 2).mean()
     loss = supervised_loss + v_reg_weight * v_reg
 
@@ -267,6 +273,8 @@ def compute_dit_supervised_loss(
             "weight_mean": weights.mean().item(),
             "weight_max": weights.max().item(),
             "weight_min": weights.min().item(),
+            "positive_frac": (weights > 0).float().mean().item(),
+            "active_samples": (weights > 0).float().sum().item(),
             "v_pred_norm": v_pred.flatten(1).norm(dim=1).mean().item(),
             "v_target_norm": v_target.flatten(1).norm(dim=1).mean().item(),
         }
@@ -465,6 +473,7 @@ def run_cache_validation(
                 prompt_embeds,
                 pooled_prompt_embeds,
                 weights,
+                normalize_by_weight_sum=config.offline.normalize_by_weight_sum,
                 cfg_drop_rate=0.0,
                 v_reg_weight=config.prior_dit.v_reg_weight,
                 null_prompt_embeds=null_prompt_embeds,
@@ -499,6 +508,8 @@ def run_cache_validation(
         "val/mse_mean": reduced["val/mse_mean_sum"] / num_batches,
         "val/v_pred_norm": reduced["val/v_pred_norm_sum"] / num_batches,
         "val/v_target_norm": reduced["val/v_target_norm_sum"] / num_batches,
+        "val/positive_frac": reduced["val/positive_frac_sum"] / num_batches,
+        "val/active_samples": reduced["val/active_samples_sum"] / num_batches,
     }
 
 
@@ -743,6 +754,7 @@ def main(_):
             "mse": 0.0,
             "reward": 0.0,
             "weight": 0.0,
+            "positive_frac": 0.0,
             "grad_norm": 0.0,
             "count": 0,
         }
@@ -774,6 +786,7 @@ def main(_):
                 prompt_embeds,
                 pooled_prompt_embeds,
                 weights,
+                normalize_by_weight_sum=config.offline.normalize_by_weight_sum,
                 cfg_drop_rate=config.prior_dit.cfg_drop_rate,
                 v_reg_weight=config.prior_dit.v_reg_weight,
                 null_prompt_embeds=null_prompt_embeds,
@@ -800,6 +813,7 @@ def main(_):
             running["mse"] += float(stats["mse_mean"])
             running["reward"] += float(rewards.mean().item())
             running["weight"] += float(weights.mean().item())
+            running["positive_frac"] += float(stats["positive_frac"])
             running["grad_norm"] += float(grad_norm.item())
 
             if accelerator.is_local_main_process:
@@ -809,10 +823,11 @@ def main(_):
                     mse=f"{running['mse'] / denom:.4f}",
                     reward=f"{running['reward'] / denom:.4f}",
                     weight=f"{running['weight'] / denom:.3f}",
+                    pos=f"{running['positive_frac'] / denom:.3f}",
                     grad=f"{running['grad_norm'] / denom:.2f}",
                 )
                 progress_bar.write(
-                    "Epoch %d batch %d/%d: loss=%.4f mse=%.4f reward=%.4f weight=%.4f grad=%.2f"
+                    "Epoch %d batch %d/%d: loss=%.4f mse=%.4f reward=%.4f weight=%.4f pos=%.4f active=%d grad=%.2f"
                     % (
                         epoch,
                         batch_idx,
@@ -821,6 +836,8 @@ def main(_):
                         float(stats["mse_mean"]),
                         float(rewards.mean().item()),
                         float(weights.mean().item()),
+                        float(stats["positive_frac"]),
+                        int(stats["active_samples"]),
                         float(grad_norm.item()),
                     )
                 )
@@ -845,6 +862,8 @@ def main(_):
                 "train/v_target_norm": reduced["train/v_target_norm_sum"] / num_batches,
                 "train/weight_max": reduced["train/weight_max_sum"] / num_batches,
                 "train/weight_min": reduced["train/weight_min_sum"] / num_batches,
+                "train/positive_frac": reduced["train/positive_frac_sum"] / num_batches,
+                "train/active_samples": reduced["train/active_samples_sum"] / num_batches,
             }
 
             val_log = run_cache_validation(
@@ -862,12 +881,14 @@ def main(_):
 
             wandb.log(train_log, step=epoch)
             logger.info(
-                "Epoch %d summary: loss=%.4f, mse=%.4f, reward=%.4f, weight=%.4f, grad=%.2f, val_loss=%s",
+                "Epoch %d summary: loss=%.4f, mse=%.4f, reward=%.4f, weight=%.4f, pos=%.4f, active=%.1f, grad=%.2f, val_loss=%s",
                 epoch,
                 train_log["train/loss"],
                 train_log["train/mse_mean"],
                 train_log["train/reward_mean"],
                 train_log["train/weight_mean"],
+                train_log["train/positive_frac"],
+                train_log["train/active_samples"],
                 train_log["train/grad_norm"],
                 "n/a" if val_log is None else f"{train_log['val/loss']:.4f}",
             )

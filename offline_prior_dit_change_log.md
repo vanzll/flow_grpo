@@ -11,32 +11,31 @@ Scope:
 Requested changes applied:
 
 1. Batch size increased
-- `offline.train_batch_size`: `16 -> 128`
-- `offline.val_batch_size`: `16 -> 128`
+- `offline.train_batch_size`: `16 -> 192`
+- `offline.val_batch_size`: `16 -> 192`
 
-2. Weight transform removed exponential
-- `offline.weight_transform`: `"exp" -> "identity"`
-
-3. Signed advantage used directly as loss weight
+2. Positive-only Flow Matching objective
 - `offline.score_source`: `"advantages"`
+- `offline.weight_transform`: `"binary_positive"`
 - `offline.positive_only`: `False`
 - `offline.normalize_weights`: `False`
 - `offline.min_weight`: `0.0`
 - `offline.score_clip`: `0.0`
+- `offline.normalize_by_weight_sum`: `True`
 
 Result:
-- Loss now uses raw signed `advantage` as the sample weight.
-- Positive advantage pushes the model toward the sample.
-- Negative advantage pushes the model away from the sample via the signed weighted MSE objective.
+- `advantage > 0` samples get weight `1`.
+- `advantage <= 0` samples get weight `0`.
+- Training now uses standard Flow Matching averaged over positive-advantage samples only.
 
-4. Regularization disabled
+3. Regularization disabled
 - `prior_dit.v_reg_weight`: `0.01 -> 0.0`
 
-5. Gradient clipping removed
+4. Gradient clipping removed
 - Training loop no longer calls `clip_grad_norm_`.
 - Logged `grad` is now the raw gradient norm before the optimizer step.
 
-6. Disable small output-head initialization for offline training
+5. Disable small output-head initialization for offline training
 - Added configurable output-head init in `flow_grpo/prior_dit.py`.
 - Offline config now sets:
   - `prior_dit.small_init_output = False`
@@ -53,6 +52,7 @@ Operational note:
   - `mse`
   - `reward`
   - `weight`
+  - `pos`
   - `grad`
 - Each batch now also prints a dedicated log line:
-  - `Epoch {epoch} batch {step}/{total}: loss=... mse=... reward=... weight=... grad=...`
+  - `Epoch {epoch} batch {step}/{total}: loss=... mse=... reward=... weight=... pos=... active=... grad=...`
