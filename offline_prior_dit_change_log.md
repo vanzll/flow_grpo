@@ -11,8 +11,8 @@ Scope:
 Requested changes applied:
 
 1. Batch size increased
-- `offline.train_batch_size`: `16 -> 192`
-- `offline.val_batch_size`: `16 -> 192`
+- `offline.train_batch_size`: `16 -> 256`
+- `offline.val_batch_size`: `16 -> 256`
 
 2. Positive-only Flow Matching objective
 - `offline.score_source`: `"advantages"`
